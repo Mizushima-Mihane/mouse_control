@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "auto_start": true,
+  "server_url": "http://127.0.0.1:7862",
+  "box_threshold": 0.03,
+  "iou_threshold": 0.1,
+  "infer_max_side": 1024,
+  "conda_python": "F:/minicond/envs/omni/Scripts/python.exe",
+  "omniparser_dir": ""
+}
