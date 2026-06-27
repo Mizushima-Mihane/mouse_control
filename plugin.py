@@ -54,7 +54,7 @@ def _path_from_setting(value: str, base: Path) -> Path | None:
 
 def _runtime_python() -> Path | None:
     runtime_dir = _project_root() / "runtime"
-    for name in ("python.exe", "python3.exe", "python"):
+    for name in ("python.exe", "python3.exe", "python", "bin/python3", "bin/python"):
         candidate = runtime_dir / name
         if candidate.exists():
             return candidate.resolve()
@@ -127,6 +127,10 @@ def _clear_omniparser_pid(plugin_root: Path) -> None:
 
 def _subprocess_creationflags() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _subprocess_new_consoleflags() -> int:
+    return subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
 
 
 def _pid_for_listening_port(port: int) -> int | None:
@@ -581,6 +585,11 @@ class MouseControlPlugin(PluginBase):
             env = _os.environ.copy()
             # HuggingFace Hub honors HF_ENDPOINT; default to hf-mirror for CN installs.
             env.setdefault("HF_ENDPOINT", DEFAULT_HF_ENDPOINT)
+            pip_packages = [
+                "ultralytics", "supervision==0.18.0", "gradio",
+                "transformers", "accelerate", "timm", "einops", "opencv-python-headless",
+                "rapidocr-onnxruntime", "easyocr",
+            ]
 
             def _tail(text: str, limit: int = 1800) -> str:
                 return (text or "").strip()[-limit:]
@@ -593,6 +602,8 @@ class MouseControlPlugin(PluginBase):
                         cwd=omniparser_dir,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=timeout,
                         env=env,
                     )
@@ -611,25 +622,12 @@ class MouseControlPlugin(PluginBase):
                 steps.append(f"✓ {label} 完成")
                 return True
 
-            # Step 1: pip install deps (不需要克隆仓库，omni_server 已内置)
-            ok = _run_step(
-                "安装依赖 (ultralytics, transformers, gradio, rapidocr, easyocr)",
-                [
-                    python_exe, "-m", "pip", "install",
-                    "ultralytics", "supervision==0.18.0", "gradio",
-                    "transformers", "accelerate", "timm", "einops", "opencv-python-headless",
-                    "rapidocr-onnxruntime", "easyocr",
-                ],
-                600,
-            )
-            if not ok:
-                return {"ok": False, "message": "\n".join(steps)}
-
             download_code = f"""
 from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from urllib.parse import quote
 import requests
@@ -654,11 +652,26 @@ def download_file(repo: str, name: str, target_root: Path) -> None:
     print(f"download: {{url}} -> {{target}}")
     with requests.get(url, stream=True, timeout=60, allow_redirects=True) as resp:
         resp.raise_for_status()
+        total = int(resp.headers.get("Content-Length") or 0)
+        downloaded = 0
+        started = time.monotonic()
+        last_report = started
         tmp = target.with_suffix(target.suffix + ".tmp")
         with tmp.open("wb") as fh:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     fh.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if now - last_report >= 1 or (total and downloaded >= total):
+                        elapsed = max(now - started, 0.001)
+                        speed = downloaded / elapsed / 1024 / 1024
+                        if total:
+                            percent = downloaded * 100 / total
+                            print(f"  {{downloaded / 1024 / 1024:.1f}}/{{total / 1024 / 1024:.1f}} MiB ({{percent:.1f}}%) {{speed:.2f}} MiB/s", flush=True)
+                        else:
+                            print(f"  {{downloaded / 1024 / 1024:.1f}} MiB {{speed:.2f}} MiB/s", flush=True)
+                        last_report = now
         tmp.replace(target)
 
 for name in [
@@ -749,14 +762,14 @@ for old_tied_weights, new_tied_weights in [
 modeling_text = modeling_text.replace(
     "class Florence2ForConditionalGeneration(Florence2PreTrainedModel):\\n"
     "    _tied_weights_keys = {{\\n"
-    "        \"language_model.model.encoder.embed_tokens.weight\": \"language_model.model.shared.weight\",\\n"
-    "        \"language_model.model.decoder.embed_tokens.weight\": \"language_model.model.shared.weight\",\\n"
+    '        "language_model.model.encoder.embed_tokens.weight": "language_model.model.shared.weight",\\n'
+    '        "language_model.model.decoder.embed_tokens.weight": "language_model.model.shared.weight",\\n'
     "    }}",
     "class Florence2ForConditionalGeneration(Florence2PreTrainedModel):\\n"
     "    _supports_sdpa = False\\n"
     "    _tied_weights_keys = {{\\n"
-    "        \"language_model.model.encoder.embed_tokens.weight\": \"language_model.model.shared.weight\",\\n"
-    "        \"language_model.model.decoder.embed_tokens.weight\": \"language_model.model.shared.weight\",\\n"
+    '        "language_model.model.encoder.embed_tokens.weight": "language_model.model.shared.weight",\\n'
+    '        "language_model.model.decoder.embed_tokens.weight": "language_model.model.shared.weight",\\n'
     "    }}",
 )
 modeling_text = modeling_text.replace(
@@ -800,6 +813,87 @@ auto_map["AutoProcessor"] = "processing_florence2.Florence2Processor"
 config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"weights ready: {{weights_dir}}")
 """
+            easyocr_code = f"""
+import easyocr
+easyocr.Reader(['en'], model_storage_directory={str(plugin_root / "easyocr")!r}, user_network_directory={str(plugin_root / "easyocr")!r})
+print("easyocr model ready")
+"""
+
+            def _cmd_quote(value: str) -> str:
+                return '"' + value.replace('"', '""') + '"'
+
+            def _write_windows_installer() -> Path:
+                install_dir = plugin_root / "logs" / "installer"
+                install_dir.mkdir(parents=True, exist_ok=True)
+                download_script = install_dir / "download_omniparser_models.py"
+                easyocr_script = install_dir / "prepare_easyocr.py"
+                cmd_script = install_dir / "install_omniparser.cmd"
+                download_script.write_text(textwrap.dedent(download_code), encoding="utf-8")
+                easyocr_script.write_text(textwrap.dedent(easyocr_code), encoding="utf-8")
+                pip_args = " ".join(pip_packages)
+                cmd_script.write_text(
+                    "\n".join(
+                        [
+                            "@echo off",
+                            "chcp 65001 >nul",
+                            "title Mouse Control OmniParser Installer",
+                            f"set HF_ENDPOINT={env['HF_ENDPOINT']}",
+                            "echo Mouse Control OmniParser Installer",
+                            "echo.",
+                            "echo Step 1/3: installing Python dependencies...",
+                            f"pushd {_cmd_quote(omniparser_dir)}",
+                            f"{_cmd_quote(python_exe)} -m pip install {pip_args}",
+                            "if errorlevel 1 goto failed",
+                            "echo.",
+                            "echo Step 2/3: downloading OmniParser and Florence model files...",
+                            f"{_cmd_quote(python_exe)} {_cmd_quote(str(download_script))}",
+                            "if errorlevel 1 goto failed",
+                            "echo.",
+                            "echo Step 3/3: preparing EasyOCR model files...",
+                            f"{_cmd_quote(python_exe)} {_cmd_quote(str(easyocr_script))}",
+                            "if errorlevel 1 goto failed",
+                            "echo.",
+                            "echo Install completed. You can close this window after checking the output.",
+                            "goto end",
+                            ":failed",
+                            "echo.",
+                            "echo Install failed. Check the error output above.",
+                            ":end",
+                            "popd",
+                            "pause",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return cmd_script
+
+            if os.name == "nt":
+                cmd_script = _write_windows_installer()
+                _sp.Popen(
+                    ["cmd.exe", "/c", str(cmd_script)],
+                    cwd=omniparser_dir,
+                    env=env,
+                    creationflags=_subprocess_new_consoleflags(),
+                )
+                return {
+                    "ok": True,
+                    "message": (
+                        "已打开 Mouse Control OmniParser Installer 安装窗口。\n"
+                        "下载进度和速度会在窗口中实时显示；安装结束后请按任意键关闭窗口。\n"
+                        f"安装脚本: {cmd_script}"
+                    ),
+                }
+
+            # Step 1: pip install deps (不需要克隆仓库，omni_server 已内置)
+            ok = _run_step(
+                "安装依赖 (ultralytics, transformers, gradio, rapidocr, easyocr)",
+                [python_exe, "-m", "pip", "install", *pip_packages],
+                600,
+            )
+            if not ok:
+                return {"ok": False, "message": "\n".join(steps)}
+
             ok = _run_step(
                 f"下载模型权重与 Florence 运行文件 (HF_ENDPOINT={env['HF_ENDPOINT']})",
                 [python_exe, "-c", textwrap.dedent(download_code)],
@@ -808,11 +902,6 @@ print(f"weights ready: {{weights_dir}}")
             if not ok:
                 return {"ok": False, "message": "\n".join(steps)}
 
-            easyocr_code = f"""
-import easyocr
-easyocr.Reader(['en'], model_storage_directory={str(plugin_root / "easyocr")!r}, user_network_directory={str(plugin_root / "easyocr")!r})
-print("easyocr model ready")
-"""
             ok = _run_step(
                 "预加载 EasyOCR 模型",
                 [python_exe, "-c", textwrap.dedent(easyocr_code)],

@@ -118,11 +118,40 @@ class OmniParserContractTests(unittest.TestCase):
         self.assertIn("returncode", text)
         self.assertIn("_run_step", text)
 
+    def test_windows_installer_uses_visible_console_with_pause_and_progress(self) -> None:
+        text = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn("CREATE_NEW_CONSOLE", text)
+        self.assertIn("Mouse Control OmniParser Installer", text)
+        self.assertIn("cmd.exe", text)
+        self.assertIn("pause", text)
+        self.assertIn("MiB/s", text)
+
+    def test_background_installer_tolerates_non_utf8_output(self) -> None:
+        text = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn('encoding="utf-8"', text)
+        self.assertIn('errors="replace"', text)
+
     def test_source_config_is_portable(self) -> None:
         cfg = json.loads((PLUGIN_DIR / "omniparser_config.json").read_text(encoding="utf-8"))
         self.assertEqual(cfg["server_url"], "http://127.0.0.1:7862")
         self.assertEqual(cfg["conda_python"], "python")
         self.assertEqual(cfg["omniparser_dir"], "")
+
+    def test_runtime_python_finds_linux_embedded_layout(self) -> None:
+        from plugins.mouse_control import plugin
+
+        old_project_root = plugin._project_root
+        try:
+            with TemporaryDirectory() as td:
+                root = Path(td)
+                python_path = root / "runtime" / "bin" / "python"
+                python_path.parent.mkdir(parents=True)
+                python_path.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+                plugin._project_root = lambda: root
+
+                self.assertEqual(plugin._runtime_python(), python_path.resolve())
+        finally:
+            plugin._project_root = old_project_root
 
     def test_relative_plugin_data_root_resolves_from_project_root(self) -> None:
         from plugins.mouse_control.plugin import _resolve_plugin_data_root
