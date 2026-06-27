@@ -1,0 +1,5 @@
+# Base dependencies for the mouse_control plugin.
+# OmniParser's heavy vision stack is installed by the plugin settings action.
+pyautogui
+Pillow>=10.0.0
+rapidocr-onnxruntime

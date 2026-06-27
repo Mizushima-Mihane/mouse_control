@@ -57,7 +57,7 @@ class OmniParserSettingsTab(QWidget):
         self._enabled_cb = QCheckBox("启用 OmniParser 视觉定位（替代 Moondream point/detect）")
         self._enabled_cb.setToolTip(
             "开启后，mouse_omniparser_* 系列工具可用。\n"
-            "需先在外部启动 OmniParser Gradio 服务。"
+            "可由插件自动启动内置 OmniParser HTTP 服务。"
         )
         layout.addWidget(self._enabled_cb)
 
@@ -65,7 +65,7 @@ class OmniParserSettingsTab(QWidget):
         grp_conn = QGroupBox("服务连接")
         fl_conn = QFormLayout(grp_conn)
         self._server_url_le = QLineEdit()
-        self._server_url_le.setPlaceholderText("http://127.0.0.1:7861")
+        self._server_url_le.setPlaceholderText("http://127.0.0.1:7862")
         fl_conn.addRow("服务器地址:", self._server_url_le)
 
         btn_row = QHBoxLayout()
@@ -117,12 +117,11 @@ class OmniParserSettingsTab(QWidget):
         grp_help = QGroupBox("启动 OmniParser 服务")
         help_layout = QVBoxLayout(grp_help)
         help_text = QLabel(
-            "在外部终端执行以下命令启动 OmniParser Gradio 服务：\n\n"
+            "默认由插件自动启动内置 OmniParser HTTP 服务。\n\n"
             '<span style="background:#1e1e1e;color:#9cdcfe;padding:4px 8px;">'
-            "cd OmniParser<br>"
-            "F:\\minicond\\envs\\omni\\Scripts\\python.exe gradio_demo.py"
+            "runtime\\python.exe plugins\\mouse_control\\omni_server.py"
             "</span>\n\n"
-            "看到 <i>Running on local URL: http://127.0.0.1:7861</i> 即启动成功。"
+            "看到 <i>Listening on http://127.0.0.1:7862</i> 即启动成功。"
         )
         help_text.setWordWrap(True)
         help_text.setTextFormat(Qt.TextFormat.RichText)
@@ -154,7 +153,7 @@ class OmniParserSettingsTab(QWidget):
 
     def _ui_to_cfg(self) -> None:
         self._cfg.enabled = self._enabled_cb.isChecked()
-        self._cfg.server_url = self._server_url_le.text().strip() or "http://127.0.0.1:7861"
+        self._cfg.server_url = self._server_url_le.text().strip() or "http://127.0.0.1:7862"
         self._cfg.box_threshold = self._box_threshold_sb.value()
         self._cfg.iou_threshold = self._iou_threshold_sb.value()
         self._cfg.infer_max_side = self._infer_max_side_sb.value()

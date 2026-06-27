@@ -23,11 +23,15 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from sdk.tool_registry import ToolNotReady, tool
+from plugins.mouse_control.config_omniparser import OmniParserConfig, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -1105,6 +1109,61 @@ def _mouse_visual_click_impl(description: str, button: str, clicks: int) -> dict
 # ═══════════════════════════════════════════════════════════════════════
 
 _OCR_IMPORT_ERROR: str | None = None
+_RAPIDOCR_WITH_BOXES: Any | None = None
+
+
+def _coerce_lookup(lookup: str = "", **aliases: Any) -> str:
+    for value in (
+        lookup,
+        aliases.get("text"),
+        aliases.get("query"),
+        aliases.get("target"),
+        aliases.get("keyword"),
+        aliases.get("search"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _get_rapidocr_with_boxes() -> Any:
+    """Load RapidOCR directly when Moondream only exposes text-only OCR helpers."""
+    global _RAPIDOCR_WITH_BOXES
+    if _RAPIDOCR_WITH_BOXES is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "请安装 rapidocr-onnxruntime：pip install rapidocr-onnxruntime"
+            ) from exc
+        _RAPIDOCR_WITH_BOXES = RapidOCR()
+    return _RAPIDOCR_WITH_BOXES
+
+
+def _rapidocr_image_with_boxes(image: Any) -> list[dict[str, Any]]:
+    engine = _get_rapidocr_with_boxes()
+    raw_result = engine(image.convert("RGB"))
+    result = raw_result[0] if isinstance(raw_result, tuple) else raw_result
+    items: list[dict[str, Any]] = []
+    for entry in result or []:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        box, text = entry[0], str(entry[1]).strip()
+        if not text:
+            continue
+        items.append({"text": text, "box": box})
+    return items
+
+
+def _ocr_image_with_boxes(image: Any) -> list[dict[str, Any]]:
+    try:
+        from plugins.moondream_vision.chinese_ocr import ocr_image_with_boxes
+    except (ImportError, AttributeError):
+        # Newer Moondream builds only expose text-only OCR helpers. Mouse click-by-text
+        # needs boxes, so keep a plugin-local RapidOCR fallback instead of depending on
+        # that private helper existing forever.
+        return _rapidocr_image_with_boxes(image)
+    return ocr_image_with_boxes(image)
 
 
 def _ocr_find_text(lookup: str) -> list[dict]:
@@ -1114,16 +1173,14 @@ def _ocr_find_text(lookup: str) -> list[dict]:
         return []
 
     try:
-        from plugins.moondream_vision.chinese_ocr import ocr_image_with_boxes
-    except ImportError as e:
+        pg = _get_pg()
+        image = pg.screenshot().convert("RGB")
+        image = _mask_own_window(image)
+        img_w, img_h = image.size
+        items = _ocr_image_with_boxes(image)
+    except Exception as e:
         _OCR_IMPORT_ERROR = str(e)
         return []
-
-    pg = _get_pg()
-    image = pg.screenshot().convert("RGB")
-    image = _mask_own_window(image)
-    img_w, img_h = image.size
-    items = ocr_image_with_boxes(image)
 
     query = lookup.strip().lower()
     matches: list[dict] = []
@@ -1157,7 +1214,22 @@ def _ocr_find_text(lookup: str) -> list[dict]:
     group=MOUSE_TOOL_GROUP,
     risk="low",
 )
-def mouse_find_text(lookup: str) -> dict[str, Any]:
+def mouse_find_text(
+    lookup: str = "",
+    text: str = "",
+    query: str = "",
+    target: str = "",
+    keyword: str = "",
+    search: str = "",
+) -> dict[str, Any]:
+    lookup = _coerce_lookup(
+        lookup,
+        text=text,
+        query=query,
+        target=target,
+        keyword=keyword,
+        search=search,
+    )
     if not (lookup or "").strip():
         return {"error": "lookup 不能为空 — 请提供要查找的文字。"}
     _show_busy(f"鼠标控制: 正在搜索文字「{lookup[:20]}」…")
@@ -1190,11 +1262,24 @@ def _mouse_find_text_impl(lookup: str) -> dict[str, Any]:
     risk="low",
 )
 def mouse_click_text(
-    lookup: str,
+    lookup: str = "",
     match_index: int = 0,
     button: str = "left",
     clicks: int = 1,
+    text: str = "",
+    query: str = "",
+    target: str = "",
+    keyword: str = "",
+    search: str = "",
 ) -> dict[str, Any]:
+    lookup = _coerce_lookup(
+        lookup,
+        text=text,
+        query=query,
+        target=target,
+        keyword=keyword,
+        search=search,
+    )
     if not (lookup or "").strip():
         return {"error": "lookup 不能为空。"}
     _show_busy(f"鼠标控制: 正在搜索文字「{lookup[:20]}」…")
@@ -1373,52 +1458,54 @@ def _mouse_visual_grid_click_impl(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  OmniParser 桥梁 — 调本地 Gradio API 获取像素级 UI 元素坐标
-#  启动: cd OmniParser && F:\minicond\envs\omni\Scripts\python.exe gradio_demo.py
+#  OmniParser 桥梁 — 调插件内置 HTTP API 获取像素级 UI 元素坐标
 #  配置: 插件设置 → OmniParser 识屏
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_omniparser_config() -> tuple[str, float, float]:
-    """读取 OmniParser 配置。"""
-    from pathlib import Path
-    config_path = Path(__file__).resolve().parent / "omniparser_config.json"
-    if config_path.exists():
-        try:
-            import json
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            return (
-                cfg.get("server_url", "http://127.0.0.1:7861"),
-                float(cfg.get("box_threshold", 0.03)),
-                float(cfg.get("iou_threshold", 0.1)),
-            )
-        except Exception:
-            pass
-    return ("http://127.0.0.1:7861", 0.03, 0.1)
+def _omniparser_data_root() -> Path:
+    """LLM 工具没有 plugin_root 参数，因此从源码位置推导宿主数据目录。"""
+    project_root = Path(__file__).resolve().parents[2]
+    data_config = Path("data/plugins/com.shinsekai.mouse_control/omniparser_config.json")
+    return (project_root / data_config).parent
+
+
+def _get_omniparser_config() -> OmniParserConfig:
+    """读取设置页保存的 data 配置，避免误读源码目录里的打包默认值。"""
+    return load_config(_omniparser_data_root())
 
 
 def _call_omniparser(screenshot) -> dict[str, Any]:
     """调用 OmniParser 独立 HTTP 服务，返回结构化 UI 元素列表。
 
-    服务启动方式:
-      F:\\minicond\\envs\\omni\\Scripts\\python.exe omni_server.py
-    端口: 7862
+    这里直接使用配置里的 server_url；旧网页服务端口迁移必须在配置层完成，
+    不能在调用层偷偷改写用户配置。
     """
-    url, box_thr, iou_thr = _get_omniparser_config()
-    # 将 Gradio 端口 (7861) 替换为独立服务端口 (7862)
-    api_url = url.rstrip("/").replace(":7861", ":7862") + "/process"
+    cfg = _get_omniparser_config()
+    if not cfg.enabled:
+        return {"error": "OmniParser 未启用。请在插件设置中启用 OmniParser 识屏。"}
+    api_url = cfg.server_url.rstrip("/") + "/process"
 
     import io
     screenshot = _mask_own_window(screenshot)
     buf = io.BytesIO()
     screenshot.save(buf, format="PNG")
     png_bytes = buf.getvalue()
+    payload = {
+        "image_b64": base64.b64encode(png_bytes).decode("ascii"),
+        "box_threshold": cfg.box_threshold,
+        "iou_threshold": cfg.iou_threshold,
+        "infer_max_side": cfg.infer_max_side,
+    }
 
     try:
         import urllib.request
-        req = urllib.request.Request(api_url, data=png_bytes, method="POST")
-        req.add_header("Content-Type", "application/octet-stream")
+        req = urllib.request.Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
         resp = urllib.request.urlopen(req, timeout=120)
         data = json.loads(resp.read().decode())
         if data.get("ok"):
@@ -1436,8 +1523,7 @@ def _call_omniparser(screenshot) -> dict[str, Any]:
         return {
             "error": (
                 f"OmniParser 服务不可用 ({api_url})。\n"
-                f"请先启动: F:\\minicond\\envs\\omni\\Scripts\\python.exe "
-                f"F:\\Alter Ego\\Shinsekai 1.6.2\\Shinsekai\\OmniParser\\omni_server.py\n"
+                f"请在插件设置中启用自动启动，或检查插件数据目录下的 logs/omniparser_stderr.log。\n"
                 f"错误: {e}"
             )
         }
@@ -1450,7 +1536,7 @@ def _call_omniparser(screenshot) -> dict[str, Any]:
         "with pixel-precise bounding boxes. "
         "Returns {type, bbox, text} for every button, icon, text field.\n"
         "MUCH more accurate than Moondream — OmniParser is trained specifically for UI.\n"
-        "NOTE: requires OmniParser Gradio server running locally on port 7861."
+        "NOTE: requires the embedded OmniParser HTTP server, default http://127.0.0.1:7862."
     ),
     group=MOUSE_TOOL_GROUP,
     risk="low",
@@ -1473,16 +1559,29 @@ def mouse_omniparser_locate() -> dict[str, Any]:
         "Matches partial text — 'login' finds 'Login button'.\n"
         "Example: mouse_omniparser_click('login') — clicks element containing 'login'.\n"
         "Example: mouse_omniparser_click('button', match_index=1) — clicks 2nd button.\n"
-        "NOTE: requires OmniParser Gradio server running locally on port 7861."
+        "NOTE: requires the embedded OmniParser HTTP server, default http://127.0.0.1:7862."
     ),
     group=MOUSE_TOOL_GROUP,
     risk="low",
 )
 def mouse_omniparser_click(
-    lookup: str,
+    lookup: str = "",
     match_index: int = 0,
     button: str = "left",
+    text: str = "",
+    query: str = "",
+    target: str = "",
+    keyword: str = "",
+    search: str = "",
 ) -> dict[str, Any]:
+    lookup = _coerce_lookup(
+        lookup,
+        text=text,
+        query=query,
+        target=target,
+        keyword=keyword,
+        search=search,
+    )
     if not (lookup or "").strip():
         return {"error": "lookup 不能为空。"}
     locate_result = mouse_omniparser_locate()

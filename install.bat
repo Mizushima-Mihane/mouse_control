@@ -1,49 +1,49 @@
 @echo off
-chcp 65001 >nul
-setlocal enabledelayedexpansion
+setlocal
 
 echo ========================================
-echo   Mouse Control v0.2.0 - 安装依赖
+echo   Mouse Control v0.3.0 - install deps
 echo ========================================
 echo.
 
-REM ── 定位 runtime python ─────────────────
-set "RUNTIME_PYTHON=%~dp0..\..\runtime\python.exe"
+set "PLUGIN_DIR=%~dp0"
+set "RUNTIME_PYTHON=%PLUGIN_DIR%..\..\runtime\python.exe"
+set "REQ_FILE=%PLUGIN_DIR%requirements.txt"
+
 if not exist "%RUNTIME_PYTHON%" (
-    echo [×] 找不到 runtime\python.exe
-    echo     路径: %RUNTIME_PYTHON%
-    echo     请确认项目根目录下的 runtime 文件夹存在。
+    echo [x] runtime\python.exe was not found.
+    echo     Path: %RUNTIME_PYTHON%
+    goto :end
+)
+
+if not exist "%REQ_FILE%" (
+    echo [x] requirements.txt was not found.
+    echo     Path: %REQ_FILE%
     goto :end
 )
 
 echo [i] Runtime Python: %RUNTIME_PYTHON%
+echo [i] Requirements:   %REQ_FILE%
 echo.
-
-REM ── 检查是否已安装 ───────────────────────
-echo [i] 检查 pyautogui 是否已安装 ...
-"%RUNTIME_PYTHON%" -c "import pyautogui; print('pyautogui', pyautogui.__version__)" 2>nul
-if %errorlevel% equ 0 (
-    echo [√] pyautogui 已安装，无需重复安装。
+echo [i] Installing plugin dependencies...
+"%RUNTIME_PYTHON%" -m pip install -r "%REQ_FILE%"
+if errorlevel 1 (
+    echo.
+    echo [x] Dependency installation failed.
+    echo     Try manually:
+    echo     "%RUNTIME_PYTHON%" -m pip install -r "%REQ_FILE%"
     goto :end
 )
 
-REM ── 安装 ─────────────────────────────────
-echo [i] 正在安装 pyautogui ...
 echo.
-"%RUNTIME_PYTHON%" -m pip install pyautogui --quiet
-echo.
-
-if %errorlevel% equ 0 (
-    echo [√] pyautogui 安装成功！
-) else (
-    echo [×] 安装失败。可能原因：
-    echo     1. 网络连接问题
-    echo     2. pip 版本过旧
-    echo     3. 需要管理员权限
-    echo.
-    echo     请尝试手动运行:
-    echo     "%RUNTIME_PYTHON%" -m pip install pyautogui
+echo [i] Verifying imports...
+"%RUNTIME_PYTHON%" -c "import pyautogui; import PIL; import rapidocr_onnxruntime; print('dependencies ok')"
+if errorlevel 1 (
+    echo [x] Dependencies were installed, but import verification failed.
+    goto :end
 )
+
+echo [ok] Mouse Control dependencies are ready.
 
 :end
 echo.

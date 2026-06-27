@@ -5,6 +5,6 @@
   "box_threshold": 0.03,
   "iou_threshold": 0.1,
   "infer_max_side": 1024,
-  "conda_python": "F:/minicond/envs/omni/Scripts/python.exe",
+  "conda_python": "python",
   "omniparser_dir": ""
 }

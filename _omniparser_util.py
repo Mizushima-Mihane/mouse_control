@@ -18,7 +18,45 @@ import numpy as np
 # %matplotlib inline
 from matplotlib import pyplot as plt
 import easyocr
-reader = easyocr.Reader(['en'])
+_easyocr_reader = None
+_rapidocr_ocr = None
+
+
+def _get_easyocr_reader():
+    """Lazy-load EasyOCR so importing the server module does not trigger downloads."""
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        model_dir = os.environ.get("OMNIPARSER_EASYOCR_DIR", "").strip()
+        kwargs = {}
+        if model_dir:
+            os.makedirs(model_dir, exist_ok=True)
+            kwargs["model_storage_directory"] = model_dir
+            kwargs["user_network_directory"] = model_dir
+        _easyocr_reader = easyocr.Reader(['en'], **kwargs)
+    return _easyocr_reader
+
+
+def _get_rapidocr_ocr():
+    """RapidOCR handles Chinese UI text; EasyOCR here is only an English fallback."""
+    global _rapidocr_ocr
+    if _rapidocr_ocr is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _rapidocr_ocr = RapidOCR()
+    return _rapidocr_ocr
+
+
+def _read_rapidocr(image_np, text_threshold=0.5):
+    result, _ = _get_rapidocr_ocr()(image_np)
+    coord = []
+    text = []
+    for item in result or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        box, label, confidence = item[0], str(item[1]).strip(), float(item[2])
+        if label and confidence > text_threshold:
+            coord.append(box)
+            text.append(label)
+    return coord, text
 # PaddleOCR 懒加载（避免未安装时整个模块崩溃）
 _paddle_ocr = None
 def _get_paddle_ocr():
@@ -42,7 +80,40 @@ import re
 from torchvision.transforms import ToPILImage
 import supervision as sv
 import torchvision.transforms as T
-from util.box_annotator import BoxAnnotator 
+try:
+    from util.box_annotator import BoxAnnotator
+except ImportError:
+    class BoxAnnotator:
+        def __init__(
+            self,
+            text_scale=0.4,
+            text_padding=5,
+            text_thickness=2,
+            thickness=3,
+        ):
+            self.text_scale = text_scale
+            self.text_padding = text_padding
+            self.text_thickness = text_thickness
+            self.thickness = thickness
+
+        def annotate(self, scene, detections, labels, image_size=None):
+            boxes = getattr(detections, "xyxy", [])
+            for idx, box in enumerate(boxes):
+                x1, y1, x2, y2 = [int(v) for v in box]
+                label = str(labels[idx]) if idx < len(labels) else str(idx)
+                cv2.rectangle(scene, (x1, y1), (x2, y2), (0, 255, 0), self.thickness)
+                origin = (x1, max(0, y1 - self.text_padding))
+                cv2.putText(
+                    scene,
+                    label,
+                    origin,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    self.text_scale,
+                    (0, 255, 0),
+                    self.text_thickness,
+                    cv2.LINE_AA,
+                )
+            return scene
 
 
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
@@ -60,12 +131,14 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
             model_name_or_path, device_map=None, torch_dtype=torch.float16
         ).to(device)
     elif model_name == "florence2":
-        from transformers import AutoProcessor, AutoModelForCausalLM 
-        processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        # The installer mirrors Florence processor/tokenizer files into model_name_or_path.
+        # Keeping runtime local-only prevents startup from silently depending on HF access.
+        processor = AutoProcessor.from_pretrained(model_name_or_path, trust_remote_code=True, local_files_only=True)
         if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True, local_files_only=True)
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True, local_files_only=True).to(device)
     return {'model': model.to(device), 'processor': processor}
 
 
@@ -225,7 +298,9 @@ def remove_overlap(boxes, iou_threshold, ocr_bbox=None):
                 if not any(IoU(box1, box3) > iou_threshold and not is_inside(box1, box3) for k, box3 in enumerate(ocr_bbox)):
                     filtered_boxes.append(box1)
             else:
-                filtered_boxes.append(box1)
+                # Keep the normalized element shape even when OCR returns no boxes.
+                # Later stages expect dict entries with bbox/content/source fields.
+                filtered_boxes.append(box1_elem)
     return torch.tensor(filtered_boxes)
 
 
@@ -306,7 +381,9 @@ def remove_overlap_new(boxes, iou_threshold, ocr_bbox=None):
                     else:
                         filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': None, 'source':'box_yolo_content_yolo'})
             else:
-                filtered_boxes.append(box1)
+                # Keep the normalized element shape even when OCR returns no boxes.
+                # Later stages expect dict entries with bbox/content/source fields.
+                filtered_boxes.append(box1_elem)
     return filtered_boxes # torch.tensor(filtered_boxes)
 
 
@@ -405,7 +482,7 @@ def int_box_area(box, w, h):
     area = (int_box[2] - int_box[0]) * (int_box[3] - int_box[1])
     return area
 
-def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_TRESHOLD=0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=128):
+def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_TRESHOLD=0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=4):
     """Process either an image path or Image object
     
     Args:
@@ -419,7 +496,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     if not imgsz:
         imgsz = (h, w)
     # print('image size:', w, h)
-    xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
+    xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=iou_threshold)
     xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
@@ -432,7 +509,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
         print('no ocr bbox!!!')
         ocr_bbox = None
 
-    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
+    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox or [], ocr_text) if int_box_area(box, w, h) > 0]
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
     
@@ -447,17 +524,23 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     time1 = time.time()
     if use_local_semantics:
         caption_model = caption_model_processor['model']
-        if 'phi3_v' in caption_model.config.model_type: 
-            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor)
-        else:
-            parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
+        try:
+            if 'phi3_v' in caption_model.config.model_type:
+                parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor)
+            else:
+                parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
+        except Exception as exc:
+            # Florence icon caption can exceed CPU memory on dense screens. Keep OCR
+            # text and element boxes usable instead of turning the whole request into 500.
+            print(f"icon caption failed, returning boxes without icon text: {exc}", file=sys.stderr, flush=True)
+            parsed_content_icon = []
         ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
         icon_start = len(ocr_text)
         parsed_content_icon_ls = []
         # fill the filtered_boxes_elem None content with parsed_content_icon in order
         for i, box in enumerate(filtered_boxes_elem):
             if box['content'] is None:
-                box['content'] = parsed_content_icon.pop(0)
+                box['content'] = parsed_content_icon.pop(0) if parsed_content_icon else ""
         for i, txt in enumerate(parsed_content_icon):
             parsed_content_icon_ls.append(f"Icon Box ID {str(i+icon_start)}: {txt}")
         parsed_content_merged = ocr_text + parsed_content_icon_ls
@@ -518,12 +601,17 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
         result = _get_paddle_ocr().ocr(image_np, cls=False)[0]
         coord = [item[0] for item in result if item[1][1] > text_threshold]
         text = [item[1][0] for item in result if item[1][1] > text_threshold]
-    else:  # EasyOCR
+    else:
         if easyocr_args is None:
             easyocr_args = {}
-        result = reader.readtext(image_np, **easyocr_args)
-        coord = [item[0] for item in result]
-        text = [item[1] for item in result]
+        text_threshold = easyocr_args.get('text_threshold', 0.5)
+        try:
+            coord, text = _read_rapidocr(image_np, text_threshold=text_threshold)
+        except Exception:
+            # Keep EasyOCR as an English-only fallback for environments without RapidOCR.
+            result = _get_easyocr_reader().readtext(image_np, **easyocr_args)
+            coord = [item[0] for item in result]
+            text = [item[1] for item in result]
     if display_img:
         opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
         bb = []

@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -25,8 +27,12 @@ from _omniparser_util import (
     get_yolo_model,
 )
 
-# 权重放在插件目录下
-_WEIGHTS = _ROOT / "omniparser_weights"
+_weights_env = os.environ.get("OMNIPARSER_WEIGHTS_DIR", "").strip()
+_WEIGHTS = (
+    Path(os.path.expandvars(_weights_env)).expanduser().resolve()
+    if _weights_env
+    else _ROOT / "omniparser_weights"
+)
 
 # ── 加载模型（启动时一次性完成）───────────────────────────────
 print("Loading YOLO...", flush=True)
@@ -36,10 +42,16 @@ caption_processor = get_caption_model_processor(
     model_name="florence2",
     model_name_or_path=str(_WEIGHTS / "icon_caption_florence"),
 )
-print(f"Models loaded. Ready on http://127.0.0.1:7862", flush=True)
+_PORT = int(os.environ.get("OMNIPARSER_PORT", "7862"))
+print(f"Models loaded. Ready on http://127.0.0.1:{_PORT}", flush=True)
 
 
-def process_image(image_bytes: bytes, box_threshold: float = 0.03, iou_threshold: float = 0.1):
+def process_image(
+    image_bytes: bytes,
+    box_threshold: float = 0.03,
+    iou_threshold: float = 0.1,
+    infer_max_side: int = 1024,
+):
     """处理一张截图，返回结构化 UI 元素列表。"""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     (text_list, ocr_bboxes), _ = check_ocr_box(
@@ -58,7 +70,8 @@ def process_image(image_bytes: bytes, box_threshold: float = 0.03, iou_threshold
         caption_model_processor=caption_processor,
         ocr_text=text_list,
         iou_threshold=iou_threshold,
-        imgsz=640,
+        imgsz=None if infer_max_side <= 0 else infer_max_side,
+        batch_size=int(os.environ.get("OMNIPARSER_CAPTION_BATCH_SIZE", "4")),
     )
     elements = []
     for item in parsed:
@@ -83,8 +96,20 @@ class OmniHandler(BaseHTTPRequestHandler):
         try:
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len)
+            content_type = self.headers.get("Content-Type", "")
+            box_threshold = 0.03
+            iou_threshold = 0.1
+            infer_max_side = 1024
+            image_bytes = body
+            if "application/json" in content_type:
+                payload = json.loads(body.decode("utf-8"))
+                image_bytes = base64.b64decode(payload["image_b64"])
+                # These fields come from the plugin settings UI.
+                box_threshold = float(payload.get("box_threshold", box_threshold))
+                iou_threshold = float(payload.get("iou_threshold", iou_threshold))
+                infer_max_side = int(payload.get("infer_max_side", infer_max_side))
             t0 = time.time()
-            elements = process_image(body)
+            elements = process_image(image_bytes, box_threshold, iou_threshold, infer_max_side)
             elapsed = time.time() - t0
             resp = {"ok": True, "count": len(elements), "elapsed": round(elapsed, 2), "elements": elements[:50]}
             self.send_response(200)
@@ -105,6 +130,7 @@ class OmniHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"OmniParser server running")
         elif self.path == "/health":
             self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
         else:
@@ -115,7 +141,7 @@ class OmniHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = 7862
+    port = _PORT
     server = HTTPServer(("127.0.0.1", port), OmniHandler)
     print(f"Listening on http://127.0.0.1:{port}", flush=True)
     try:
