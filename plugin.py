@@ -887,8 +887,9 @@ print("easyocr model ready")
 
             if os.name == "nt":
                 cmd_script = _write_windows_installer()
+                cmd_script_path = _windows_cmd_path(str(cmd_script))
                 _sp.Popen(
-                    ["cmd.exe", "/c", str(cmd_script)],
+                    ["cmd.exe", "/c", cmd_script_path],
                     cwd=_windows_cmd_path(omniparser_dir),
                     env=env,
                     creationflags=_subprocess_new_consoleflags(),
@@ -898,7 +899,7 @@ print("easyocr model ready")
                     "message": (
                         "已打开 Mouse Control OmniParser Installer 安装窗口。\n"
                         "下载进度和速度会在窗口中实时显示；安装结束后请按任意键关闭窗口。\n"
-                        f"安装脚本: {cmd_script}"
+                        f"安装脚本: {cmd_script_path}"
                     ),
                 }
 

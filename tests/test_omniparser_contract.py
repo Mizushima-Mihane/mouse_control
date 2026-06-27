@@ -140,6 +140,8 @@ class OmniParserContractTests(unittest.TestCase):
         self.assertIn("_windows_cmd_path(python_exe)", text)
         self.assertIn("_windows_cmd_path(str(download_script))", text)
         self.assertIn("_windows_cmd_path(str(easyocr_script))", text)
+        self.assertIn("_windows_cmd_path(str(cmd_script))", text)
+        self.assertIn('["cmd.exe", "/c", cmd_script_path]', text)
         self.assertIn("cwd=_windows_cmd_path(omniparser_dir)", text)
 
     def test_background_installer_tolerates_non_utf8_output(self) -> None:
