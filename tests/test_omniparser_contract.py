@@ -126,6 +126,22 @@ class OmniParserContractTests(unittest.TestCase):
         self.assertIn("pause", text)
         self.assertIn("MiB/s", text)
 
+    def test_windows_cmd_path_strips_extended_length_prefix(self) -> None:
+        from plugins.mouse_control import plugin
+
+        self.assertEqual(
+            plugin._windows_cmd_path(r"\\?\F:\Alter Ego\Shinsekai\runtime\python.exe"),
+            r"F:\Alter Ego\Shinsekai\runtime\python.exe",
+        )
+
+    def test_windows_installer_normalizes_cmd_paths(self) -> None:
+        text = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertIn("_windows_cmd_path(omniparser_dir)", text)
+        self.assertIn("_windows_cmd_path(python_exe)", text)
+        self.assertIn("_windows_cmd_path(str(download_script))", text)
+        self.assertIn("_windows_cmd_path(str(easyocr_script))", text)
+        self.assertIn("cwd=_windows_cmd_path(omniparser_dir)", text)
+
     def test_background_installer_tolerates_non_utf8_output(self) -> None:
         text = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
         self.assertIn('encoding="utf-8"', text)

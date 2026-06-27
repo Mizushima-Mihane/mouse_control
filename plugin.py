@@ -52,6 +52,19 @@ def _path_from_setting(value: str, base: Path) -> Path | None:
     return path.resolve()
 
 
+def _windows_cmd_path(value: str | Path) -> str:
+    text = str(value)
+    unc_prefix = "\\\\?\\UNC\\"
+    extended_prefix = "\\\\?\\"
+    # cmd.exe builtins such as pushd treat extended-length paths as UNC-like
+    # paths and can fail with "The network name cannot be found".
+    if text.startswith(unc_prefix):
+        return "\\\\" + text[len(unc_prefix):]
+    if text.startswith(extended_prefix):
+        return text[len(extended_prefix):]
+    return text
+
+
 def _runtime_python() -> Path | None:
     runtime_dir = _project_root() / "runtime"
     for name in ("python.exe", "python3.exe", "python", "bin/python3", "bin/python"):
@@ -831,6 +844,10 @@ print("easyocr model ready")
                 download_script.write_text(textwrap.dedent(download_code), encoding="utf-8")
                 easyocr_script.write_text(textwrap.dedent(easyocr_code), encoding="utf-8")
                 pip_args = " ".join(pip_packages)
+                cmd_omniparser_dir = _windows_cmd_path(omniparser_dir)
+                cmd_python_exe = _windows_cmd_path(python_exe)
+                cmd_download_script = _windows_cmd_path(str(download_script))
+                cmd_easyocr_script = _windows_cmd_path(str(easyocr_script))
                 cmd_script.write_text(
                     "\n".join(
                         [
@@ -841,16 +858,16 @@ print("easyocr model ready")
                             "echo Mouse Control OmniParser Installer",
                             "echo.",
                             "echo Step 1/3: installing Python dependencies...",
-                            f"pushd {_cmd_quote(omniparser_dir)}",
-                            f"{_cmd_quote(python_exe)} -m pip install {pip_args}",
+                            f"pushd {_cmd_quote(cmd_omniparser_dir)}",
+                            f"{_cmd_quote(cmd_python_exe)} -m pip install {pip_args}",
                             "if errorlevel 1 goto failed",
                             "echo.",
                             "echo Step 2/3: downloading OmniParser and Florence model files...",
-                            f"{_cmd_quote(python_exe)} {_cmd_quote(str(download_script))}",
+                            f"{_cmd_quote(cmd_python_exe)} {_cmd_quote(cmd_download_script)}",
                             "if errorlevel 1 goto failed",
                             "echo.",
                             "echo Step 3/3: preparing EasyOCR model files...",
-                            f"{_cmd_quote(python_exe)} {_cmd_quote(str(easyocr_script))}",
+                            f"{_cmd_quote(cmd_python_exe)} {_cmd_quote(cmd_easyocr_script)}",
                             "if errorlevel 1 goto failed",
                             "echo.",
                             "echo Install completed. You can close this window after checking the output.",
@@ -872,7 +889,7 @@ print("easyocr model ready")
                 cmd_script = _write_windows_installer()
                 _sp.Popen(
                     ["cmd.exe", "/c", str(cmd_script)],
-                    cwd=omniparser_dir,
+                    cwd=_windows_cmd_path(omniparser_dir),
                     env=env,
                     creationflags=_subprocess_new_consoleflags(),
                 )
