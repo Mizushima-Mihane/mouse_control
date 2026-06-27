@@ -1373,12 +1373,25 @@ def _grid_answer_to_pct(answer: str, rows: int, cols: int) -> tuple[float, float
     risk="low",
 )
 def mouse_visual_grid_click(
-    description: str,
+    description: str = "",
     rows: int = 4,
     cols: int = 4,
     button: str = "left",
+    text: str = "",
+    query: str = "",
+    target: str = "",
+    keyword: str = "",
+    search: str = "",
 ) -> dict[str, Any]:
-    desc = (description or "").strip()
+    # LLMs may choose target/query/text instead of the documented description.
+    desc = _coerce_lookup(
+        description,
+        text=text,
+        query=query,
+        target=target,
+        keyword=keyword,
+        search=search,
+    )
     if not desc:
         return {"error": "description 不能为空。"}
     _show_busy(f"鼠标控制: 网格定位「{desc[:30]}」…")

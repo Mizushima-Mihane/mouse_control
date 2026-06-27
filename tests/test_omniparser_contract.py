@@ -352,6 +352,25 @@ class OmniParserContractTests(unittest.TestCase):
             llm_tool._clamp = old_clamp
             llm_tool._check_user_interrupt = old_interrupt
 
+    def test_visual_grid_click_accepts_target_alias(self) -> None:
+        from plugins.mouse_control import llm_tool
+
+        old_impl = llm_tool._mouse_visual_grid_click_impl
+        try:
+            llm_tool._mouse_visual_grid_click_impl = lambda desc, rows, cols, button: {
+                "description": desc,
+                "grid": f"{rows}x{cols}",
+                "button": button,
+                "status": "clicked",
+            }
+
+            result = llm_tool.mouse_visual_grid_click(target="close button")
+
+            self.assertEqual(result["description"], "close button")
+            self.assertEqual(result["grid"], "4x4")
+        finally:
+            llm_tool._mouse_visual_grid_click_impl = old_impl
+
     def test_save_values_stops_omniparser_when_disabled(self) -> None:
         from plugins.mouse_control.plugin import MouseControlPlugin
 
