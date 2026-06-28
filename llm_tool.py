@@ -2194,8 +2194,27 @@ def mouse_find_window(lookup: str = "") -> dict[str, Any]:
 #  任务栏/托盘图标定位 — Win32 + UIA 读取 Shell 元素位置
 # ═══════════════════════════════════════════════════════════════════════
 
+def _win32_process_name(pid: int) -> str:
+    """从 PID 获取进程 exe 名。"""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    try:
+        h = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
+        if not h:
+            return ""
+        buf = ctypes.create_unicode_buffer(260)
+        size = wintypes.DWORD(260)
+        kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        kernel32.CloseHandle(h)
+        path = buf.value
+        return path.rsplit("\\", 1)[-1].replace(".exe", "") if path else ""
+    except Exception:
+        return ""
+
+
 def _enum_taskbar_items() -> list[dict]:
-    """枚举任务栏上的图标和按钮（含开始按钮、 pinned 图标、系统托盘）。"""
+    """枚举任务栏图标，含进程名、窗口标题、精确坐标。"""
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.windll.user32
@@ -2220,9 +2239,14 @@ def _enum_taskbar_items() -> list[dict]:
         cls_buf = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, cls_buf, 64)
         cls_name = cls_buf.value
+        # 读进程名
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        proc = _win32_process_name(pid.value) if pid.value else ""
 
         items.append({
-            "text": text.strip(),
+            "text": text.strip() or proc,
+            "program": proc,
             "class": cls_name,
             "rect": [r.left, r.top, r.right, r.bottom],
             "x_pct": round(((r.left + r.right) / 2.0) / _SCREEN_W, 5) if _SCREEN_W else 0,
