@@ -193,9 +193,30 @@ _LANDMARKS: dict[str, tuple[float, float]] = {
 }
 
 
+_OFFSET_X: int = 0
+_OFFSET_Y: int = 0
+_OFFSET_LOADED: bool = False
+
+
+def _load_calibration() -> None:
+    global _OFFSET_X, _OFFSET_Y, _OFFSET_LOADED
+    if _OFFSET_LOADED:
+        return
+    _OFFSET_LOADED = True
+    try:
+        from pathlib import Path
+        from plugins.mouse_control.config_omniparser import load_config as _lcfg
+        cfg = _lcfg(Path(__file__).resolve().parent)
+        _OFFSET_X = int(cfg.offset_x)
+        _OFFSET_Y = int(cfg.offset_y)
+    except Exception:
+        pass
+
+
 def _to_pixels(fx: float, fy: float) -> tuple[int, int]:
-    """屏幕占比 (0~1) → 像素坐标。"""
-    return int(fx * _SCREEN_W), int(fy * _SCREEN_H)
+    """屏幕占比 (0~1) → 像素坐标（含校准偏移）。"""
+    _load_calibration()
+    return int(fx * _SCREEN_W) + _OFFSET_X, int(fy * _SCREEN_H) + _OFFSET_Y
 
 
 def _clamp(x: int, y: int) -> tuple[int, int]:
@@ -2292,3 +2313,109 @@ def mouse_find_taskbar() -> dict[str, Any]:
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+def _uia_taskbar_deep() -> list[dict]:
+    """用 uiautomation 包深度遍历 Win11 任务栏，读每个按钮的坐标。"""
+    try:
+        import uiautomation as _uia
+    except ImportError:
+        return []
+
+    items: list[dict] = []
+    try:
+        # UIA 返回物理像素，需要转为 pyautogui 逻辑像素
+        import ctypes as _ct
+        sw = _ct.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        sh = _ct.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+        scale = sw / _SCREEN_W if _SCREEN_W else 1.0
+        if scale < 0.5 or scale > 3.0:
+            scale = 1.0  # sanity check
+
+        root = _uia.GetRootControl()
+        for pane in root.GetChildren():
+            b = pane.BoundingRectangle
+            if not (b.top > 100 and b.height() <= 60 and b.width() >= 800):
+                continue
+            for g1 in pane.GetChildren():
+                for g2 in g1.GetChildren():
+                    for g3 in g2.GetChildren():
+                        try:
+                            cb = g3.BoundingRectangle
+                            w, h = cb.width(), cb.height()
+                            if g3.ControlTypeName == "ButtonControl" and w >= 24 and h >= 16:
+                                px = int((cb.left + w / 2) / scale)
+                                py = int((cb.top + h / 2) / scale)
+                                items.append({
+                                    "text": (g3.Name or "").strip(),
+                                    "x_pixel": px, "y_pixel": py,
+                                    "x_pct": round(px / _SCREEN_W, 5) if _SCREEN_W else 0,
+                                    "y_pct": round(py / _SCREEN_H, 5) if _SCREEN_H else 0,
+                                })
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    return items
+
+
+# ── 交互式坐标校准 ──────────────────────────────────────────────
+
+_CALIB_STEPS: list[dict] = []
+
+@tool(
+    name="mouse_calibrate_setup", group=MOUSE_TOOL_GROUP, risk="low",
+    description="Start calibration. Assistant moves to a point, you manually move to the correct position, then call confirm.",
+)
+def mouse_calibrate_setup() -> dict[str, Any]:
+    global _CALIB_STEPS
+    _CALIB_STEPS = []
+    _load_calibration()
+    return {"offset": [_OFFSET_X, _OFFSET_Y]}
+
+@tool(
+    name="mouse_calibrate_point", group=MOUSE_TOOL_GROUP, risk="low",
+    description="Move cursor to a test point. User then manually moves to correct position and calls confirm.",
+)
+def mouse_calibrate_point(label: str, x_pct: float, y_pct: float) -> dict[str, Any]:
+    pg = _get_pg()
+    tx, ty = _to_pixels(x_pct, y_pct)
+    pg.moveTo(tx, ty, duration=0.2)
+    _CALIB_STEPS.append({"label": label, "target_x": tx, "target_y": ty})
+    return {"step": len(_CALIB_STEPS)-1, "label": label, "cursor_at": [tx, ty]}
+
+@tool(
+    name="mouse_calibrate_confirm", group=MOUSE_TOOL_GROUP, risk="low",
+    description="Read current cursor position (after user moved it) and record delta.",
+)
+def mouse_calibrate_confirm(step_id: int) -> dict[str, Any]:
+    if step_id < 0 or step_id >= len(_CALIB_STEPS):
+        return {"error": f"Invalid step {step_id}"}
+    step = _CALIB_STEPS[step_id]
+    pg = _get_pg()
+    ax, ay = pg.position()
+    step["ax"], step["ay"] = ax, ay
+    step["dx"], step["dy"] = ax - step["target_x"], ay - step["target_y"]
+    return {"step": step_id, "delta": [step["dx"], step["dy"]]}
+
+@tool(
+    name="mouse_calibrate_finish", group=MOUSE_TOOL_GROUP, risk="low",
+    description="Save average offset from all calibration steps.",
+)
+def mouse_calibrate_finish() -> dict[str, Any]:
+    global _OFFSET_X, _OFFSET_Y, _CALIB_STEPS, _OFFSET_LOADED
+    done = [s for s in _CALIB_STEPS if "dx" in s]
+    if not done:
+        return {"error": "No confirmed steps"}
+    dx = sum(s["dx"] for s in done) // len(done)
+    dy = sum(s["dy"] for s in done) // len(done)
+    _OFFSET_X, _OFFSET_Y = dx, dy
+    _OFFSET_LOADED = True
+    from pathlib import Path
+    from plugins.mouse_control.config_omniparser import load_config as _lcfg, save_config as _scfg
+    root = Path(__file__).resolve().parent
+    cfg = _lcfg(root)
+    cfg.offset_x, cfg.offset_y = dx, dy
+    _scfg(cfg, root)
+    _CALIB_STEPS = []
+    return {"offset": [dx, dy], "samples": len(done)}

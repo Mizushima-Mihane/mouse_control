@@ -6,5 +6,7 @@
   "iou_threshold": 0.1,
   "infer_max_side": 1024,
   "conda_python": "python",
-  "omniparser_dir": ""
+  "omniparser_dir": "",
+  "offset_x": 0,
+  "offset_y": 0
 }

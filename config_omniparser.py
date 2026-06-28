@@ -27,6 +27,8 @@ class OmniParserConfig:
     # 自动启动所需路径
     conda_python: str = DEFAULT_CONDA_PYTHON  # 默认用 Shinsekai runtime Python
     omniparser_dir: str = DEFAULT_OMNIPARSER_DIR  # 留空则使用插件源码目录
+    offset_x: int = 0
+    offset_y: int = 0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> OmniParserConfig:
@@ -39,6 +41,8 @@ class OmniParserConfig:
             infer_max_side=int(d.get("infer_max_side", 1024)),
             conda_python=str(d.get("conda_python", DEFAULT_CONDA_PYTHON)),
             omniparser_dir=str(d.get("omniparser_dir", DEFAULT_OMNIPARSER_DIR)),
+            offset_x=int(d.get("offset_x", 0)),
+            offset_y=int(d.get("offset_y", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -51,6 +55,8 @@ class OmniParserConfig:
             "infer_max_side": self.infer_max_side,
             "conda_python": self.conda_python,
             "omniparser_dir": self.omniparser_dir,
+            "offset_x": self.offset_x,
+            "offset_y": self.offset_y,
         }
 
 

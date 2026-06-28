@@ -443,6 +443,33 @@ class MouseControlPlugin(PluginBase):
                 },
             ],
         },
+        {
+            "id": "calibration",
+            "title": "坐标校准",
+            "description": "初次使用建议和 char 共同校准：让 char 依次调用 mouse_calibrate_setup → point(四角) → confirm → finish，测得偏差后填入此处。",
+            "fields": [
+                {
+                    "key": "offset_x",
+                    "label": "X轴偏移",
+                    "type": "integer",
+                    "defaultValue": 0,
+                    "min": -500,
+                    "max": 500,
+                    "step": 1,
+                    "description": "水平偏移量(px)。正值=向右偏移，负值=向左偏移。",
+                },
+                {
+                    "key": "offset_y",
+                    "label": "Y轴偏移",
+                    "type": "integer",
+                    "defaultValue": 0,
+                    "min": -500,
+                    "max": 500,
+                    "step": 1,
+                    "description": "垂直偏移量(px)。正值=向下偏移，负值=向上偏移。",
+                },
+            ],
+        },
     ]
 
     _OMNI_I18N = {
@@ -493,6 +520,14 @@ class MouseControlPlugin(PluginBase):
                         },
                     },
                 },
+                "calibration": {
+                    "title": "坐标校准",
+                    "description": "初次使用建议和 char 共同校准：让 char 依次调用 mouse_calibrate_setup → point(四角) → confirm → finish，测得偏差后填入此处。",
+                    "fields": {
+                        "offset_x": {"label": "X轴偏移", "description": "水平偏移(px)。正=右移，负=左移。"},
+                        "offset_y": {"label": "Y轴偏移", "description": "垂直偏移(px)。正=下移，负=上移。"},
+                    },
+                },
             },
         },
     }
@@ -539,6 +574,8 @@ class MouseControlPlugin(PluginBase):
                 "infer_max_side": cfg.infer_max_side,
                 "conda_python": cfg.conda_python,
                 "omniparser_dir": cfg.omniparser_dir,
+                "offset_x": cfg.offset_x,
+                "offset_y": cfg.offset_y,
             }
 
         def save_values(values):
@@ -552,6 +589,8 @@ class MouseControlPlugin(PluginBase):
                 infer_max_side=int(values.get("infer_max_side", 1024)),
                 conda_python=str(values.get("conda_python", current.conda_python or DEFAULT_CONDA_PYTHON)),
                 omniparser_dir=str(values.get("omniparser_dir", current.omniparser_dir or DEFAULT_OMNIPARSER_DIR)),
+                offset_x=int(values.get("offset_x", current.offset_x)),
+                offset_y=int(values.get("offset_y", current.offset_y)),
             )
             save_config(cfg, plugin_root)
             # 如果用户开启了自动启动，立即尝试拉起服务

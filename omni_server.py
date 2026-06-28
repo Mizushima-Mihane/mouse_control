@@ -103,7 +103,8 @@ class OmniHandler(BaseHTTPRequestHandler):
             image_bytes = body
             if "application/json" in content_type:
                 payload = json.loads(body.decode("utf-8"))
-                image_bytes = base64.b64decode(payload["image_b64"])
+                if "image_b64" in payload:
+                    image_bytes = base64.b64decode(payload["image_b64"])
                 # These fields come from the plugin settings UI.
                 box_threshold = float(payload.get("box_threshold", box_threshold))
                 iou_threshold = float(payload.get("iou_threshold", iou_threshold))
