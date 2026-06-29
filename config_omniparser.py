@@ -29,6 +29,11 @@ class OmniParserConfig:
     omniparser_dir: str = DEFAULT_OMNIPARSER_DIR  # 留空则使用插件源码目录
     offset_x: int = 0
     offset_y: int = 0
+    offset_cloud_x: int = 0
+    offset_cloud_y: int = 0
+    btn_close_offset: int = 20
+    btn_max_offset: int = 40
+    btn_min_offset: int = 80
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> OmniParserConfig:
@@ -43,6 +48,11 @@ class OmniParserConfig:
             omniparser_dir=str(d.get("omniparser_dir", DEFAULT_OMNIPARSER_DIR)),
             offset_x=int(d.get("offset_x", 0)),
             offset_y=int(d.get("offset_y", 0)),
+            offset_cloud_x=int(d.get("offset_cloud_x", 0)),
+            offset_cloud_y=int(d.get("offset_cloud_y", 0)),
+            btn_close_offset=int(d.get("btn_close_offset", 20)),
+            btn_max_offset=int(d.get("btn_max_offset", 60)),
+            btn_min_offset=int(d.get("btn_min_offset", 80)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,6 +67,11 @@ class OmniParserConfig:
             "omniparser_dir": self.omniparser_dir,
             "offset_x": self.offset_x,
             "offset_y": self.offset_y,
+            "offset_cloud_x": self.offset_cloud_x,
+            "offset_cloud_y": self.offset_cloud_y,
+            "btn_close_offset": self.btn_close_offset,
+            "btn_max_offset": self.btn_max_offset,
+            "btn_min_offset": self.btn_min_offset,
         }
 
 

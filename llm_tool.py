@@ -70,11 +70,13 @@ def _find_shinsekai_window_rect() -> tuple[int, int, int, int] | None:
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value
-            # 匹配 Shinsekai / 新世界 / 桌面助手 等标题
-            if title and any(kw in title for kw in ("Shinsekai", "新世界", "桌面助手", "Chat")):
+            # 匹配新世界聊天窗口：标题含 Shinsekai，但排除 VS Code / 文件资源管理器
+            if title and "Shinsekai" in title and "Visual Studio" not in title and "文件资源" not in title:
                 r = wintypes.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(r))
-                if r.right - r.left > 100 and r.bottom - r.top > 100:
+                w, h = r.right - r.left, r.bottom - r.top
+                # 聊天窗口约 400x600 到 800x1000，排除太小的（160x28 是最小化的）和太大的
+                if 300 < w < 1200 and 300 < h < 1200:
                     found.append((r.left, r.top, r.right, r.bottom))
             return True
 
@@ -118,7 +120,7 @@ _SCREEN_H: int = 0
 _last_known_position: tuple[int, int] | None = None
 _last_known_time: float = 0.0
 _INTERRUPT_THRESHOLD = 75  # 用户移动超过 75px 即视为主动中断
-_INTERRUPT_MAX_AGE = 30.0  # 超过 30 秒未操作视为新一轮对话，不检测中断
+_INTERRUPT_MAX_AGE = 10.0  # 超过 10 秒视为新对话，不检测中断
 
 
 def _get_pg():
@@ -195,11 +197,13 @@ _LANDMARKS: dict[str, tuple[float, float]] = {
 
 _OFFSET_X: int = 0
 _OFFSET_Y: int = 0
+_OFFSET_CLOUD_X: int = 0
+_OFFSET_CLOUD_Y: int = 0
 _OFFSET_LOADED: bool = False
 
 
 def _load_calibration() -> None:
-    global _OFFSET_X, _OFFSET_Y, _OFFSET_LOADED
+    global _OFFSET_X, _OFFSET_Y, _OFFSET_CLOUD_X, _OFFSET_CLOUD_Y, _OFFSET_LOADED
     if _OFFSET_LOADED:
         return
     _OFFSET_LOADED = True
@@ -209,14 +213,22 @@ def _load_calibration() -> None:
         cfg = _lcfg(Path(__file__).resolve().parent)
         _OFFSET_X = int(cfg.offset_x)
         _OFFSET_Y = int(cfg.offset_y)
+        _OFFSET_CLOUD_X = int(cfg.offset_cloud_x)
+        _OFFSET_CLOUD_Y = int(cfg.offset_cloud_y)
     except Exception:
         pass
 
 
 def _to_pixels(fx: float, fy: float) -> tuple[int, int]:
-    """屏幕占比 (0~1) → 像素坐标（含校准偏移）。"""
+    """屏幕占比 (0~1) → 像素坐标（含 OmniParser 校准偏移）。"""
     _load_calibration()
-    return int(fx * _SCREEN_W) + _OFFSET_X, int(fy * _SCREEN_H) + _OFFSET_Y
+    return int(float(fx) * _SCREEN_W) + _OFFSET_X, int(float(fy) * _SCREEN_H) + _OFFSET_Y
+
+
+def _cloud_to_pixels(fx: float, fy: float) -> tuple[int, int]:
+    """屏幕占比 (0~1) → 像素坐标（含 cloud_vision 校准偏移）。"""
+    _load_calibration()
+    return int(float(fx) * _SCREEN_W) + _OFFSET_CLOUD_X, int(float(fy) * _SCREEN_H) + _OFFSET_CLOUD_Y
 
 
 def _clamp(x: int, y: int) -> tuple[int, int]:
@@ -379,7 +391,7 @@ def mouse_diagnose() -> dict[str, Any]:
 @tool(
     name="mouse_move",
     description=(
-        "Move mouse cursor to a target position. Choose ONE positioning mode:\n"
+        "Move mouse cursor to a target position. Move mouse to position. 移到中间/移到右下角. Choose ONE mode:\n"
         "  • landmark: named anchor — 'center', 'top_left', 'top_center', "
         "'top_right', 'left_center', 'right_center', 'bottom_left', "
         "'bottom_center', 'bottom_right'\n"
@@ -491,7 +503,7 @@ def mouse_click(button: str = "left", clicks: int = 1) -> dict[str, Any]:
 @tool(
     name="mouse_click_at",
     description=(
-        "Move AND click in one step. Supports landmark / grid / pct modes.\n"
+        "Move to position and click. 点屏幕中间/点左上角. Use landmark or pct.\n"
         "Shortcut for: mouse_move(...) + mouse_click().\n"
         "Example: mouse_click_at(landmark='center') → click screen center.\n"
         "Example: mouse_click_at(x_pct=0.5, y_pct=0.3, button='right') → right-click at 50%,30%.\n"
@@ -760,22 +772,6 @@ def _try_import_moondream_modules() -> tuple | None:
         return None
 
 
-@tool(
-    name="mouse_visual_locate",
-    description=(
-        "Find a UI element on screen using the vision model. "
-        "IMPORTANT: Use simple English category names like 'button', 'close icon', "
-        "'text input', 'menu', 'checkbox'. Do NOT use complex descriptions — "
-        "the model only understands simple object categories.\n"
-        "GOOD: 'button', 'close icon', 'text input', 'menu'\n"
-        "BAD: 'the blue Submit button in the bottom right corner' (too complex)\n\n"
-        "Returns x_pct/y_pct that can be used with mouse_click_at(x_pct=...).\n"
-        "If there are multiple matches, use the first one and refine with mouse_move_relative.\n"
-        "NOTE: requires Moondream vision plugin. First use triggers model download (2-10 min)."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_visual_locate(description: str) -> dict[str, Any]:
     desc = (description or "").strip()
     if not desc:
@@ -932,30 +928,40 @@ def _omniparser_search(description: str) -> dict[str, Any] | None:
 
 
 def _visual_locate_best(description: str) -> dict[str, Any]:
-    """视觉定位最佳策略：OmniParser > Moondream detect > Moondream point > OCR"""
-    # 1. 先试 OmniParser（UI 专训，最准）
-    omni = _omniparser_search(description)
+    """视觉定位：分工路由 —— OmniParser vs cloud_vision 不打架。
+
+    cloud_vision 主导: 窗口、图标、任务栏、非标准UI（需要语义理解）
+    OmniParser 主导: 文字按钮、标签、菜单等标准UI控件（精确坐标）
+    """
+    desc = description
+    # ── 判断场景 ──────────────────────────────────────────
+    _WINDOW_KW = (
+        "window", "窗口", "title", "标题", "drag", "拖", "close", "关闭",
+        "minimize", "最大化", "bar", "栏", "border", "tab", "标签", "taskbar", "任务栏",
+        "icon", "图标", "desktop", "桌面", "tray", "托盘", "start", "开始",
+    )
+    _UI_KW = (
+        "button", "按钮", "textbox", "输入框", "text", "文字", "link", "链接",
+        "menu", "菜单", "checkbox", "勾选", "dropdown", "下拉", "submit", "提交",
+        "login", "登录", "ok", "确定", "cancel", "取消", "save", "保存",
+    )
+    is_visual = any(kw in desc.lower() for kw in _WINDOW_KW)
+    is_ui = any(kw in desc.lower() for kw in _UI_KW)
+
+    # ── 场景1: 窗口/图标/任务栏 → cloud_vision（暂时禁用，待校准完成后开启）──
+    # if is_visual and not is_ui:
+    #     cv = _cloud_vision_point_coords(desc)
+    #     if cv is not None: ...
+
+    # ── 场景2: 文字按钮/UI控件 → OmniParser 优先 ─────────
+    omni = _omniparser_search(desc)
     if omni is not None:
         return omni
 
-    # 2. 再试 Moondream detect
-    detect_result = _visual_detect_impl(description)
-    if "error" not in detect_result and detect_result.get("objects"):
-        best = detect_result["objects"][0]
-        fx = (best["x1"] + best["x2"]) / 2.0
-        fy = (best["y1"] + best["y2"]) / 2.0
-        return {
-            "method": "detect",
-            "description": description,
-            "x_pct": round(fx, 5),
-            "y_pct": round(fy, 5),
-            "x_pixel": int(fx * _SCREEN_W),
-            "y_pixel": int(fy * _SCREEN_H),
-            "screen_size": [_SCREEN_W, _SCREEN_H],
-            "bounding_box": best,
-        }
-
-    # 3. fallback 到 point
+    # ── 回退链 ──────────────────────────────────────────
+    # OmniParser 没找到 → 试 cloud_vision（暂时禁用）
+    # cv = _cloud_vision_point_coords(desc)
+    # 最后回退 Moondream
     return mouse_visual_locate(description)
 
 
@@ -1043,17 +1049,6 @@ def _visual_detect_impl(description: str) -> dict[str, Any]:
     return {"description": desc, "objects": cleaned, "count": len(cleaned)}
 
 
-@tool(
-    name="mouse_visual_detect",
-    description=(
-        "Detect UI elements on screen and return bounding boxes. "
-        "IMPORTANT: Use simple English category names — 'button', 'icon', 'text'.\n"
-        "Example: mouse_visual_detect('button') or mouse_visual_detect('close icon').\n"
-        "NOTE: requires Moondream vision plugin."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_visual_detect(description: str) -> dict[str, Any]:
     _show_busy(f"鼠标控制: 正在检测「{description[:30]}」…")
     try:
@@ -1062,20 +1057,6 @@ def mouse_visual_detect(description: str) -> dict[str, Any]:
         _hide_busy()
 
 
-@tool(
-    name="mouse_visual_click",
-    description=(
-        "Find a UI element on screen using vision and CLICK it. "
-        "IMPORTANT: Use simple English category names — 'button', 'close icon', 'menu'. "
-        "Do NOT use complex descriptions — the model only understands categories.\n"
-        "Example: mouse_visual_click('button') for a generic button.\n"
-        "Example: mouse_visual_click('close icon') for a close/X button.\n"
-        "For clicking specific TEXT, use mouse_click_text() instead — it's far more accurate.\n"
-        "NOTE: requires Moondream vision plugin."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_visual_click(
     description: str,
     button: str = "left",
@@ -1272,12 +1253,8 @@ def _mouse_find_text_impl(lookup: str) -> dict[str, Any]:
 @tool(
     name="mouse_click_text",
     description=(
-        "Find text on screen using OCR and CLICK it — the MOST accurate way to click "
-        "buttons, menus, links, and any text element.\n"
-        "Example: mouse_click_text('登录') → clicks the login button.\n"
-        "Example: mouse_click_text('关闭') → clicks the close button.\n"
-        "Use match_index to pick among multiple matches (0=first, 1=second…).\n"
-        "NOTE: for non-text icons/images, use mouse_visual_click instead."
+        "Click text on screen. 点文字按钮. Use lookup='登录' to find and click it.\n"
+        "Example: mouse_click_text(lookup='登录') or just mouse_click_text('登录')."
     ),
     group=MOUSE_TOOL_GROUP,
     risk="low",
@@ -1380,19 +1357,6 @@ def _grid_answer_to_pct(answer: str, rows: int, cols: int) -> tuple[float, float
     return None
 
 
-@tool(
-    name="mouse_visual_grid_click",
-    description=(
-        "Divide screen into a labeled grid, ask vision model which cell contains "
-        "the target, then click that cell's center. "
-        "MUCH more reliable than point/detect — the model only answers a simple "
-        "'which cell' question instead of guessing exact pixel coordinates.\n"
-        "Example: mouse_visual_grid_click('the submit button', rows=4, cols=4)\n"
-        "Use higher rows/cols for more precision, lower for better identification."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_visual_grid_click(
     description: str,
     rows: int = 4,
@@ -1573,18 +1537,6 @@ def mouse_omniparser_locate() -> dict[str, Any]:
     return result
 
 
-@tool(
-    name="mouse_omniparser_click",
-    description=(
-        "Use OmniParser to find a UI element by text or type and CLICK it. "
-        "Matches partial text — 'login' finds 'Login button'.\n"
-        "Example: mouse_omniparser_click('login') — clicks element containing 'login'.\n"
-        "Example: mouse_omniparser_click('button', match_index=1) — clicks 2nd button.\n"
-        "NOTE: requires the embedded OmniParser HTTP server, default http://127.0.0.1:7862."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_omniparser_click(
     lookup: str = "",
     match_index: int = 0,
@@ -1842,29 +1794,33 @@ def _moondream_help_identify(desc: str, elements: list) -> str | None:
 @tool(
     name="mouse_smart_click",
     description=(
-        "THE most accurate way to click anything. OmniParser + Moondream combined.\n"
-        "1. OmniParser scans UI elements with pixel-exact coordinates\n"
-        "2. Text match first (fast, accurate)\n"
-        "3. If no match, Moondream visually identifies the target\n"
-        "4. Clicks best match\n"
-        "Example: mouse_smart_click('the submit button')\n"
-        "Example: mouse_smart_click('close the error dialog')"
+        "Click screen elements. NOT for windows→mouse_close/minimize/maximize_window. NOT for taskbar→mouse_find_taskbar. OK for labeled UI: mouse_smart_click('登录')."
     ),
     group=MOUSE_TOOL_GROUP,
     risk="low",
 )
 def mouse_smart_click(
-    description: str,
+    query: str,
     button: str = "left",
 ) -> dict[str, Any]:
-    desc = (description or "").strip()
+    desc = (query or "").strip()
     if not desc:
         return {"error": "description 不能为空。"}
 
     pg = _get_pg()
 
     # ── 判断是否窗口类操作 ──────────────────────────────────
-    # 拖窗口/标题栏/关闭按钮等动态元素，Moondream 视觉定位比 OmniParser 准
+    # 语义翻译：把中文意图书面化，避免 LLM 字面搜索
+    _SEMANTIC_MAP = {
+        "关闭窗口": "close button", "关掉": "close button", "叉掉": "close button",
+        "最小化": "minimize button", "最大化": "maximize button", "放大": "maximize button",
+        "缩小": "minimize button", "退出": "close button",
+    }
+    for cn, en in _SEMANTIC_MAP.items():
+        if cn in desc:
+            desc = desc.replace(cn, en)
+            break
+
     _WINDOW_KW = [
         "window", "窗口", "title", "标题", "drag", "拖", "close", "关闭",
         "minimize", "最小化", "maximize", "最大化", "bar", "栏", "border", "边框",
@@ -2094,23 +2050,10 @@ def mouse_smart_drag(
 #  Moondream 定位工具 — 暴露 point() API 给 LLM 直接调
 # ═══════════════════════════════════════════════════════════════════════
 
-@tool(
-    name="mouse_moondream_point",
-    description=(
-        "Use Moondream vision model to locate an element on screen and return its "
-        "coordinates (x_pct, y_pct). Better than OmniParser for dynamic/window elements. "
-        "Describe what you want to find in natural language.\n"
-        "Example: mouse_moondream_point('the title bar of the topmost window')\n"
-        "Returns x_pct/y_pct ready for mouse_click_at(x_pct=..., y_pct=...).\n"
-        "NOTE: requires Moondream vision plugin loaded."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
-def mouse_moondream_point(description: str) -> dict[str, Any]:
-    desc = (description or "").strip()
+def mouse_moondream_point(query: str) -> dict[str, Any]:
+    desc = (query or "").strip()
     if not desc:
-        return {"error": "description 不能为空。"}
+        return {"error": "query 不能为空。"}
     coords = _moondream_point_coords(desc)
     if coords is None:
         return {"error": f"Moondream point() 未能定位 '{desc}'。请确保 Moondream 插件已加载。"}
@@ -2149,16 +2092,17 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
         w, h = r.right - r.left, r.bottom - r.top
         if w < 50 or h < 50:
             return True
-        # 标题栏高度约 30-40px
-        title_bar_y = r.top + 15
+        # 标题栏：Y 固定在 r.top+16 处，X 避开左右按钮区
+        title_bar_y = r.top + 16
         found.append({
             "title": title,
             "rect": [r.left, r.top, r.right, r.bottom],
-            "width": w,
-            "height": h,
-            "title_bar_center": {
-                "x_pixel": (r.left + r.right) // 2,
-                "y_pixel": title_bar_y,
+            "width": w, "height": h,
+            "title_bar": {
+                "y": title_bar_y,
+                "x_left": r.left + 40,        # 避开左边图标区
+                "x_right": r.right - 120,     # 避开关闭/最大/最小按钮
+                "x_center": (r.left + r.right) // 2,
             },
         })
         return True
@@ -2178,35 +2122,40 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
                 if kw.lower() in w["title"].lower():
                     return w
 
+    # 无关键词 → 优先前台窗口，其次最大窗口（但不是桌面）
+    fg = user32.GetForegroundWindow()
+    if fg:
+        fg_rect = wintypes.RECT()
+        user32.GetWindowRect(fg, ctypes.byref(fg_rect))
+        for w in found:
+            wr = w["rect"]
+            if abs(wr[0] - fg_rect.left) < 5 and abs(wr[1] - fg_rect.top) < 5:
+                return w
+    # 回退：第一个非桌面窗口
+    for w in found:
+        if "Program Manager" not in w.get("title", ""):
+            return w
     return found[0] if found else None
 
 
 @tool(
     name="mouse_find_window",
     description=(
-        "Find window positions using Windows API (no AI model needed). "
-        "Returns title bar center coordinates for all visible windows. "
-        "Use this for window dragging, closing, minimizing — no VRAM cost.\n"
-        "Example: mouse_find_window() — lists all windows.\n"
-        "Example: mouse_find_window('Chrome') — finds Chrome's title bar."
+        "Find desktop windows (NOT taskbar icons). 找窗口位置/拖窗口. "
+        "For taskbar icons use mouse_find_taskbar instead. "
+        "query='Chrome' finds Chrome's window. Empty=all windows."
     ),
     group=MOUSE_TOOL_GROUP,
     risk="low",
 )
-def mouse_find_window(lookup: str = "") -> dict[str, Any]:
+def mouse_find_window(query: str = "") -> dict[str, Any]:
+    """Find window by title. query='Chrome' finds Chrome window, returns title bar coords."""
     try:
-        keywords = [lookup.strip()] if lookup.strip() else None
+        keywords = [query.strip()] if query.strip() else None
         result = _win32_find_window(keywords)
         if result is None:
             return {"error": "未找到可见窗口。"}
-        return {
-            "lookup": lookup,
-            "window": result,
-            "usage": (
-                "To drag this window: mouse_drag with start at title_bar_center "
-                "x_pixel/y_pixel, or use mouse_smart_drag with end_landmark."
-            ),
-        }
+        return {"query": query, "window": result}
     except Exception as e:
         return {"error": str(e)}
 
@@ -2291,19 +2240,14 @@ def _enum_taskbar_items() -> list[dict]:
 
 @tool(
     name="mouse_find_taskbar",
-    description=(
-        "Find items on the Windows taskbar — Start button, pinned icons, running apps, "
-        "system tray icons. Returns exact positions ready for clicking.\n"
-        "Example: mouse_find_taskbar() → lists all taskbar items.\n"
-        "Use mouse_click_at with returned x_pct/y_pct to click an item."
-    ),
+    description="Find taskbar icons: 打开QQ/点微信/启动Chrome/任务栏图标. Use this when user asks to open/switch to a program via taskbar. Returns each icon's name + exact position.",
     group=MOUSE_TOOL_GROUP,
     risk="low",
 )
 def mouse_find_taskbar() -> dict[str, Any]:
     try:
         _get_pg()
-        items = _enum_taskbar_items()
+        items = _uia_taskbar_deep() or _enum_taskbar_items()
         if not items:
             return {"error": "未找到任务栏项目。"}
         return {
@@ -2337,23 +2281,28 @@ def _uia_taskbar_deep() -> list[dict]:
             b = pane.BoundingRectangle
             if not (b.top > 100 and b.height() <= 60 and b.width() >= 800):
                 continue
-            for g1 in pane.GetChildren():
-                for g2 in g1.GetChildren():
-                    for g3 in g2.GetChildren():
-                        try:
-                            cb = g3.BoundingRectangle
-                            w, h = cb.width(), cb.height()
-                            if g3.ControlTypeName == "ButtonControl" and w >= 24 and h >= 16:
-                                px = int((cb.left + w / 2) / scale)
-                                py = int((cb.top + h / 2) / scale)
-                                items.append({
-                                    "text": (g3.Name or "").strip(),
-                                    "x_pixel": px, "y_pixel": py,
-                                    "x_pct": round(px / _SCREEN_W, 5) if _SCREEN_W else 0,
-                                    "y_pct": round(py / _SCREEN_H, 5) if _SCREEN_H else 0,
-                                })
-                        except Exception:
-                            pass
+            # 递归遍历（应用图标在深度5，托盘图标在深度3）
+            def _walk(ctrl, depth: int = 0):
+                if depth > 6:
+                    return
+                try:
+                    cb = ctrl.BoundingRectangle
+                    w, h = cb.width(), cb.height()
+                    if ctrl.ControlTypeName == "ButtonControl" and w >= 24 and h >= 16:
+                        _load_calibration()
+                        px = int((cb.left + w / 2) / scale) + _OFFSET_X
+                        py = int((cb.top + h / 2) / scale) + _OFFSET_Y
+                        items.append({
+                            "text": (ctrl.Name or "").strip(),
+                            "x_pixel": px, "y_pixel": py,
+                            "x_pct": round(px / _SCREEN_W, 5) if _SCREEN_W else 0,
+                            "y_pct": round(py / _SCREEN_H, 5) if _SCREEN_H else 0,
+                        })
+                    for child in ctrl.GetChildren():
+                        _walk(child, depth + 1)
+                except Exception:
+                    pass
+            _walk(pane)
     except Exception:
         pass
     return items
@@ -2375,7 +2324,7 @@ def mouse_calibrate_setup() -> dict[str, Any]:
 
 @tool(
     name="mouse_calibrate_point", group=MOUSE_TOOL_GROUP, risk="low",
-    description="Move cursor to a test point. User then manually moves to correct position and calls confirm.",
+    description="Move cursor to corner. REQUIRED args: label='左上', x_pct=0.0, y_pct=0.0. After user corrects position, call mouse_calibrate_confirm(step_id). Do NOT call without args.",
 )
 def mouse_calibrate_point(label: str, x_pct: float, y_pct: float) -> dict[str, Any]:
     pg = _get_pg()
@@ -2419,3 +2368,231 @@ def mouse_calibrate_finish() -> dict[str, Any]:
     _scfg(cfg, root)
     _CALIB_STEPS = []
     return {"offset": [dx, dy], "samples": len(done)}
+
+
+# ── cloud_vision 独立校准 ────────────────────────────────────────
+
+_CALIB_CLOUD: list[dict] = []
+
+@tool(name="mouse_calibrate_cloud_setup", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Start cloud_vision calibration. Same flow as mouse_calibrate_setup but saves to cloud_vision offset.")
+def mouse_calibrate_cloud_setup() -> dict[str, Any]:
+    global _CALIB_CLOUD
+    _CALIB_CLOUD = []
+    _load_calibration()
+    return {"cloud_offset": [_OFFSET_CLOUD_X, _OFFSET_CLOUD_Y]}
+
+@tool(name="mouse_calibrate_cloud_point", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Move cursor for cloud_vision calibration. REQUIRED args: label='左上', x_pct=0.0, y_pct=0.0. Do NOT call without args.")
+def mouse_calibrate_cloud_point(label: str, x_pct: float, y_pct: float) -> dict[str, Any]:
+    pg = _get_pg()
+    tx, ty = _cloud_to_pixels(x_pct, y_pct)
+    pg.moveTo(tx, ty, duration=0.2)
+    _CALIB_CLOUD.append({"label": label, "tx": tx, "ty": ty})
+    return {"step": len(_CALIB_CLOUD)-1, "label": label}
+
+@tool(name="mouse_calibrate_cloud_confirm", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Read user-corrected cursor position for cloud calibration.")
+def mouse_calibrate_cloud_confirm(step_id: int) -> dict[str, Any]:
+    if step_id < 0 or step_id >= len(_CALIB_CLOUD):
+        return {"error": f"Invalid step {step_id}"}
+    s = _CALIB_CLOUD[step_id]
+    pg = _get_pg()
+    ax, ay = pg.position()
+    s["dx"], s["dy"] = ax - s["tx"], ay - s["ty"]
+    return {"step": step_id, "delta": [s["dx"], s["dy"]]}
+
+@tool(name="mouse_calibrate_cloud_finish", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Save cloud_vision calibration offset.")
+def mouse_calibrate_cloud_finish() -> dict[str, Any]:
+    global _OFFSET_CLOUD_X, _OFFSET_CLOUD_Y, _CALIB_CLOUD, _OFFSET_LOADED
+    done = [s for s in _CALIB_CLOUD if "dx" in s]
+    if not done:
+        return {"error": "No confirmed cloud steps"}
+    dx = sum(s["dx"] for s in done) // len(done)
+    dy = sum(s["dy"] for s in done) // len(done)
+    _OFFSET_CLOUD_X, _OFFSET_CLOUD_Y = dx, dy
+    _OFFSET_LOADED = True
+    from pathlib import Path
+    from plugins.mouse_control.config_omniparser import load_config as _lcfg, save_config as _scfg
+    root = Path(__file__).resolve().parent
+    cfg = _lcfg(root)
+    cfg.offset_cloud_x, cfg.offset_cloud_y = dx, dy
+    _scfg(cfg, root)
+    _CALIB_CLOUD = []
+    return {"cloud_offset": [dx, dy], "samples": len(done)}
+
+
+def _enum_taskbar_hwnd() -> list[dict]:
+    """Win32: 遍历 MSTaskListWClass 的子窗口获取任务栏图标位置。"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+
+    items: list[dict] = []
+    taskbar = user32.FindWindowW("Shell_TrayWnd", None)
+    if not taskbar:
+        return items
+    # 找到任务栏图标容器
+    tasklist = user32.FindWindowExW(taskbar, 0, "MSTaskSwWClass", None)
+    if tasklist:
+        tasklist = user32.FindWindowExW(tasklist, 0, "MSTaskListWClass", None)
+    if not tasklist:
+        # Win11 可能路径不同
+        rebar = user32.FindWindowExW(taskbar, 0, "ReBarWindow32", None)
+        if rebar:
+            tasklist = user32.FindWindowExW(rebar, 0, "MSTaskSwWClass", None)
+            if tasklist:
+                tasklist = user32.FindWindowExW(tasklist, 0, "MSTaskListWClass", None)
+
+    if not tasklist:
+        return items
+
+    _load_calibration()
+
+    def _enum(hwnd, _lparam):
+        r = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w < 24 or h < 16:
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        text = ""
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            text = buf.value
+        px = (r.left + r.right) // 2 + _OFFSET_X
+        py = (r.top + r.bottom) // 2 + _OFFSET_Y
+        items.append({
+            "text": text.strip(),
+            "x_pixel": px, "y_pixel": py,
+            "x_pct": round(px / _SCREEN_W, 5) if _SCREEN_W else 0,
+            "y_pct": round(py / _SCREEN_H, 5) if _SCREEN_H else 0,
+        })
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumChildWindows(tasklist, WNDENUMPROC(_enum), 0)
+    return items
+
+
+def _window_button_pos(query: str, btn: str) -> dict[str, Any]:
+    """内部：找窗口并点击按钮。无 query 时取前台窗口。"""
+    win = _win32_find_window([query.strip()] if query.strip() else None)
+    if win is None:
+        return {"error": f"未找到窗口 '{query}'"}
+    r = win["rect"]
+    tb = win["title_bar"]
+    _load_calibration()
+    from pathlib import Path
+    from plugins.mouse_control.config_omniparser import load_config as _lcfg
+    cfg = _lcfg(Path(__file__).resolve().parent)
+    offsets = {"close": cfg.btn_close_offset, "maximize": cfg.btn_max_offset, "minimize": cfg.btn_min_offset}
+    off = offsets.get(btn, 20)
+    x = r[2] - off
+    y = tb["y"]
+    try:
+        pg = _get_pg()
+        pg.click(x=x, y=y)
+        return {"action": btn, "window": win["title"], "x_pixel": x, "y_pixel": y, "clicked": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool(name="mouse_close_window", group=MOUSE_TOOL_GROUP, risk="low",
+      description="ONLY for closing windows (X button). Use when user says: 关闭/关掉/叉掉/退出+window. ONLY this tool, never others for close.")
+def mouse_close_window(query: str = "") -> dict[str, Any]:
+    return _window_button_pos(query, "close")
+
+@tool(name="mouse_maximize_window", group=MOUSE_TOOL_GROUP, risk="low",
+      description="ONLY for maximize/restore (口 button). Use when user says: 最大化/放大/还原+window. ONLY this tool.")
+def mouse_maximize_window(query: str = "") -> dict[str, Any]:
+    return _window_button_pos(query, "maximize")
+
+@tool(name="mouse_minimize_window", group=MOUSE_TOOL_GROUP, risk="low",
+      description="ONLY for minimize (－ button). Use when user says: 最小化/缩小+window. ONLY this tool.")
+def mouse_minimize_window(query: str = "") -> dict[str, Any]:
+    return _window_button_pos(query, "minimize")
+
+
+@tool(name="mouse_detect_buttons", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Auto-detect window button positions on current foreground window. Returns actual close/max/min X offsets from right edge. Use once to calibrate.")
+def mouse_detect_buttons() -> dict[str, Any]:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return {"error": "No foreground window"}
+
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    right = r.right
+
+    # 用 SystemParametersInfo 读标题栏按钮宽度
+    # SPI_GETCAPTIONBUTTONSIZE doesn't exist. Use SM_CXSIZE for caption button width.
+    btn_w = user32.GetSystemMetrics(29)  # SM_CXSIZE = 30, but varies by Windows version
+    btn_h = user32.GetSystemMetrics(30)  # SM_CYSIZE = 31
+    # Actually SM_CXSIZE is caption width, not button width.
+    # Use GetTitleBarInfo if available.
+
+    class TITLEBARINFO(ctypes.Structure):
+        _fields_ = [
+            ('cbSize', wintypes.DWORD),
+            ('rcTitleBar', wintypes.RECT),
+            ('rgstate', wintypes.DWORD * 6),
+            ('rgrect', wintypes.RECT * 6),
+        ]
+    tbi = TITLEBARINFO()
+    tbi.cbSize = ctypes.sizeof(TITLEBARINFO)
+    
+    if user32.GetTitleBarInfo(hwnd, ctypes.byref(tbi)):
+        # rgrect indices: 2=close, 3=min, 5=help (varies)
+        buttons = {}
+        for i in range(6):
+            gr = tbi.rgrect[i]
+            if gr.right > gr.left and gr.bottom > gr.top:
+                offset = right - (gr.left + gr.right) // 2
+                label = {2: "close", 3: "minimize", 4: "maximize", 5: "help"}.get(i, f"btn{i}")
+                buttons[label] = {
+                    "x_offset_from_right": offset,
+                    "x_pixel": (gr.left + gr.right) // 2,
+                    "width": gr.right - gr.left,
+                }
+        if buttons:
+            close = buttons.get("close", {})
+            maximize = buttons.get("maximize", {})
+            minimize = buttons.get("minimize", {})
+            return {
+                "method": "GetTitleBarInfo",
+                "close": close.get("x_offset_from_right", 12),
+                "maximize": maximize.get("x_offset_from_right", 34),
+                "minimize": minimize.get("x_offset_from_right", 56),
+                "raw": {k: {"offset": v["x_offset_from_right"], "w": v["width"]} for k, v in buttons.items()},
+            }
+
+    # Fallback: estimate from system metrics
+    caption_h = user32.GetSystemMetrics(4)   # SM_CYCAPTION
+    frame_w = user32.GetSystemMetrics(32)     # SM_CXSIZEFRAME  
+    btn_est_w = caption_h - 6  # button is roughly caption height minus padding
+    gap = max(2, frame_w // 2)
+    return {
+        "method": "SystemMetrics_estimate",
+        "caption_height": caption_h,
+        "estimated_button_width": btn_est_w,
+        "close": btn_est_w // 2 + 2,
+        "maximize": btn_est_w + gap + btn_est_w // 2 + 2,
+        "minimize": 2 * (btn_est_w + gap) + btn_est_w // 2 + 2,
+        "note": "Estimated from system metrics. For precise values, try with a standard Win32 window as foreground.",
+    }
+
+
+
+@tool(name="mouse_reset_interrupt", group=MOUSE_TOOL_GROUP, risk="low",
+      description="Reset interrupt state. Call this ONCE at the start of each turn before any mouse operations.")
+def mouse_reset_interrupt() -> dict[str, Any]:
+    global _last_known_position
+    _last_known_position = None
+    return {"reset": True, "message": "中断状态已清除，可以开始操作鼠标。"}

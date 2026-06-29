@@ -444,30 +444,21 @@ class MouseControlPlugin(PluginBase):
             ],
         },
         {
-            "id": "calibration",
-            "title": "坐标校准",
-            "description": "初次使用建议和 char 共同校准：让 char 依次调用 mouse_calibrate_setup → point(四角) → confirm → finish，测得偏差后填入此处。",
+            "id": "calibration_omni",
+            "title": "OmniParser 校准",
+            "description": "和 char 共同校准：mouse_calibrate_setup → point(四角) → confirm → finish，测得偏差后填入下方。影响所有 OmniParser 定位结果。",
             "fields": [
-                {
-                    "key": "offset_x",
-                    "label": "X轴偏移",
-                    "type": "integer",
-                    "defaultValue": 0,
-                    "min": -500,
-                    "max": 500,
-                    "step": 1,
-                    "description": "水平偏移量(px)。正值=向右偏移，负值=向左偏移。",
-                },
-                {
-                    "key": "offset_y",
-                    "label": "Y轴偏移",
-                    "type": "integer",
-                    "defaultValue": 0,
-                    "min": -500,
-                    "max": 500,
-                    "step": 1,
-                    "description": "垂直偏移量(px)。正值=向下偏移，负值=向上偏移。",
-                },
+                {"key": "offset_x", "label": "X轴偏移", "type": "integer", "defaultValue": 0, "min": -500, "max": 500, "step": 1, "description": "水平偏移(px)。正值=右移。"},
+                {"key": "offset_y", "label": "Y轴偏移", "type": "integer", "defaultValue": 0, "min": -500, "max": 500, "step": 1, "description": "垂直偏移(px)。正值=下移。"},
+            ],
+        },
+        {
+            "id": "calibration_cloud",
+            "title": "cloud_vision 校准",
+            "description": "和 char 共同校准：mouse_calibrate_cloud_setup → cloud_point(四角) → cloud_confirm → cloud_finish。cloud_vision 有独立坐标系，需要单独校准。",
+            "fields": [
+                {"key": "offset_cloud_x", "label": "Cloud X轴偏移", "type": "integer", "defaultValue": 0, "min": -500, "max": 500, "step": 1, "description": "cloud_vision 水平偏移(px)。"},
+                {"key": "offset_cloud_y", "label": "Cloud Y轴偏移", "type": "integer", "defaultValue": 0, "min": -500, "max": 500, "step": 1, "description": "cloud_vision 垂直偏移(px)。"},
             ],
         },
     ]
@@ -520,12 +511,20 @@ class MouseControlPlugin(PluginBase):
                         },
                     },
                 },
-                "calibration": {
-                    "title": "坐标校准",
-                    "description": "初次使用建议和 char 共同校准：让 char 依次调用 mouse_calibrate_setup → point(四角) → confirm → finish，测得偏差后填入此处。",
+                "calibration_omni": {
+                    "title": "OmniParser 校准",
+                    "description": "和 char 共同校准：mouse_calibrate_setup → point(四角) → confirm → finish。",
                     "fields": {
-                        "offset_x": {"label": "X轴偏移", "description": "水平偏移(px)。正=右移，负=左移。"},
-                        "offset_y": {"label": "Y轴偏移", "description": "垂直偏移(px)。正=下移，负=上移。"},
+                        "offset_x": {"label": "X轴偏移", "description": "水平偏移(px)。"},
+                        "offset_y": {"label": "Y轴偏移", "description": "垂直偏移(px)。"},
+                    },
+                },
+                "calibration_cloud": {
+                    "title": "cloud_vision 校准",
+                    "description": "和 char 共同校准：mouse_calibrate_cloud_setup → cloud_point → cloud_confirm → cloud_finish。",
+                    "fields": {
+                        "offset_cloud_x": {"label": "Cloud X偏移", "description": "cloud_vision 水平偏移(px)。"},
+                        "offset_cloud_y": {"label": "Cloud Y偏移", "description": "cloud_vision 垂直偏移(px)。"},
                     },
                 },
             },
@@ -576,6 +575,8 @@ class MouseControlPlugin(PluginBase):
                 "omniparser_dir": cfg.omniparser_dir,
                 "offset_x": cfg.offset_x,
                 "offset_y": cfg.offset_y,
+                "offset_cloud_x": cfg.offset_cloud_x,
+                "offset_cloud_y": cfg.offset_cloud_y,
             }
 
         def save_values(values):
@@ -591,6 +592,8 @@ class MouseControlPlugin(PluginBase):
                 omniparser_dir=str(values.get("omniparser_dir", current.omniparser_dir or DEFAULT_OMNIPARSER_DIR)),
                 offset_x=int(values.get("offset_x", current.offset_x)),
                 offset_y=int(values.get("offset_y", current.offset_y)),
+                offset_cloud_x=int(values.get("offset_cloud_x", current.offset_cloud_x)),
+                offset_cloud_y=int(values.get("offset_cloud_y", current.offset_cloud_y)),
             )
             save_config(cfg, plugin_root)
             # 如果用户开启了自动启动，立即尝试拉起服务
