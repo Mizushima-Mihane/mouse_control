@@ -2093,16 +2093,21 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
         if w < 50 or h < 50:
             return True
         # 标题栏：Y 固定在 r.top+16 处，X 避开左右按钮区
-        title_bar_y = r.top + 16
+        re = r.right; title_bar_y = r.top + 16
         found.append({
             "title": title,
             "rect": [r.left, r.top, r.right, r.bottom],
             "width": w, "height": h,
             "title_bar": {
                 "y": title_bar_y,
-                "x_left": r.left + 40,        # 避开左边图标区
-                "x_right": r.right - 120,     # 避开关闭/最大/最小按钮
-                "x_center": (r.left + r.right) // 2,
+                "x_left": r.left + 40,
+                "x_right": re - 120,
+                "x_center": (r.left + re) // 2,
+            },
+            "buttons": {
+                "close(X)":    {"x_pixel": re - 21,  "y_pixel": title_bar_y},
+                "maximize(口)": {"x_pixel": re - 68,  "y_pixel": title_bar_y},
+                "minimize(－)": {"x_pixel": re - 114, "y_pixel": title_bar_y},
             },
         })
         return True

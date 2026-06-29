@@ -32,8 +32,8 @@ class OmniParserConfig:
     offset_cloud_x: int = 0
     offset_cloud_y: int = 0
     btn_close_offset: int = 20
-    btn_max_offset: int = 40
-    btn_min_offset: int = 80
+    btn_max_offset: int = 60
+    btn_min_offset: int = 100
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> OmniParserConfig:
