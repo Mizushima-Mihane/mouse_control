@@ -120,7 +120,7 @@ _SCREEN_H: int = 0
 _last_known_position: tuple[int, int] | None = None
 _last_known_time: float = 0.0
 _INTERRUPT_THRESHOLD = 75  # 用户移动超过 75px 即视为主动中断
-_INTERRUPT_MAX_AGE = 10.0  # 超过 10 秒视为新对话，不检测中断
+_INTERRUPT_MAX_AGE = 30.0  # 超过 30 秒视为新对话，不检测中断
 
 
 def _get_pg():
@@ -1809,17 +1809,25 @@ def mouse_smart_click(
 
     pg = _get_pg()
 
-    # ── 判断是否窗口类操作 ──────────────────────────────────
-    # 语义翻译：把中文意图书面化，避免 LLM 字面搜索
-    _SEMANTIC_MAP = {
-        "关闭窗口": "close button", "关掉": "close button", "叉掉": "close button",
-        "最小化": "minimize button", "最大化": "maximize button", "放大": "maximize button",
-        "缩小": "minimize button", "退出": "close button",
+    # ── 窗口操作直接处理，不走 OmniParser ──────────────────
+    _WIN_ACT = {
+        "关闭": "close", "关掉": "close", "关了": "close", "叉掉": "close", "退出": "close",
+        "最大化": "maximize", "放大": "maximize", "全屏": "maximize",
+        "最小化": "minimize", "缩小": "minimize",
     }
-    for cn, en in _SEMANTIC_MAP.items():
-        if cn in desc:
-            desc = desc.replace(cn, en)
-            break
+    for kw, act in _WIN_ACT.items():
+        if kw in desc:
+            # 提取窗口名：去掉动作词，剩下的作为搜索关键词
+            name = desc.replace(kw, "").strip()
+            keywords = [name] if name else None
+            win = _win32_find_window(keywords)
+            if win:
+                offsets = {"close": 21, "maximize": 68, "minimize": 114}
+                r = win["rect"]
+                x, y = r[2] - offsets[act], win["title_bar"]["y"]
+                pg.click(x=x, y=y)
+                _track_position(x, y)
+                return {"action": act, "window": win["title"], "clicked": True}
 
     _WINDOW_KW = [
         "window", "窗口", "title", "标题", "drag", "拖", "close", "关闭",
@@ -2077,7 +2085,18 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
     found = []
 
     def _enum(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
+        # 白名单：只收有标题栏的真实应用窗口
+        style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+        if not (style & 0x00C00000):  # WS_CAPTION
+            return True
+        r = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w < 80 or h < 80:
+            return True
+        # 排除全屏覆盖层
+        sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        if w >= sw * 0.9 and h >= sh * 0.9:
             return True
         length = user32.GetWindowTextLengthW(hwnd)
         if length == 0:
@@ -2087,10 +2106,9 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
         title = buf.value
         if not title.strip():
             return True
-        r = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(r))
-        w, h = r.right - r.left, r.bottom - r.top
-        if w < 50 or h < 50:
+        # 排除全屏覆盖层（NVIDIA/Shell等）和系统窗口
+        sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        if w >= sw * 0.95 and h >= sh * 0.95:
             return True
         # 标题栏：Y 固定在 r.top+16 处，X 避开左右按钮区
         re = r.right; title_bar_y = r.top + 16
@@ -2138,7 +2156,8 @@ def _win32_find_window(title_keywords: list[str] | None = None) -> dict | None:
                 return w
     # 回退：第一个非桌面窗口
     for w in found:
-        if "Program Manager" not in w.get("title", ""):
+        skip = ("Program Manager", "NVIDIA", "Shell Handwriting", "MacroKey")
+        if not any(kw in w.get("title", "") for kw in skip):
             return w
     return found[0] if found else None
 
@@ -2503,22 +2522,6 @@ def _window_button_pos(query: str, btn: str) -> dict[str, Any]:
         return {"action": btn, "window": win["title"], "x_pixel": x, "y_pixel": y, "clicked": True}
     except Exception as e:
         return {"error": str(e)}
-
-
-@tool(name="mouse_close_window", group=MOUSE_TOOL_GROUP, risk="low",
-      description="ONLY for closing windows (X button). Use when user says: 关闭/关掉/叉掉/退出+window. ONLY this tool, never others for close.")
-def mouse_close_window(query: str = "") -> dict[str, Any]:
-    return _window_button_pos(query, "close")
-
-@tool(name="mouse_maximize_window", group=MOUSE_TOOL_GROUP, risk="low",
-      description="ONLY for maximize/restore (口 button). Use when user says: 最大化/放大/还原+window. ONLY this tool.")
-def mouse_maximize_window(query: str = "") -> dict[str, Any]:
-    return _window_button_pos(query, "maximize")
-
-@tool(name="mouse_minimize_window", group=MOUSE_TOOL_GROUP, risk="low",
-      description="ONLY for minimize (－ button). Use when user says: 最小化/缩小+window. ONLY this tool.")
-def mouse_minimize_window(query: str = "") -> dict[str, Any]:
-    return _window_button_pos(query, "minimize")
 
 
 @tool(name="mouse_detect_buttons", group=MOUSE_TOOL_GROUP, risk="low",
