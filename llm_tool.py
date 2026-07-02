@@ -154,16 +154,13 @@ _INTERRUPT_RESPONSE = {
 
 
 def _check_user_interrupt(pg) -> dict | None:
-    """如果用户在上次操作后移动了鼠标，返回中断响应。
-
-    超过 30 秒未操作视为新一轮对话，自动清除中断状态——
-    用户回复 char 期间自然会动鼠标（点对话框选项等），不应被当成中断。
-    """
+    """同一轮连续工具调用间用户动了鼠标 → 中断。跨轮（>5秒）自动清除。"""
     global _last_known_position, _last_known_time
     if _last_known_position is None:
         return None
-    # 超过 _INTERRUPT_MAX_AGE 秒 → 新一轮对话，不检测
-    if __import__("time").time() - _last_known_time > _INTERRUPT_MAX_AGE:
+    now = __import__("time").time()
+    # 超过 5 秒没操作 = 新轮次，自动清——用户回消息肯定超过 5 秒
+    if now - _last_known_time > 5.0:
         _last_known_position = None
         return None
     cx, cy = pg.position()
@@ -1455,77 +1452,6 @@ def _omniparser_data_root() -> Path:
     return (project_root / data_config).parent
 
 
-def _get_omniparser_config() -> OmniParserConfig:
-    """读取设置页保存的 data 配置，避免误读源码目录里的打包默认值。"""
-    return load_config(_omniparser_data_root())
-
-
-def _call_omniparser(screenshot) -> dict[str, Any]:
-    """调用 OmniParser 独立 HTTP 服务，返回结构化 UI 元素列表。
-
-    这里直接使用配置里的 server_url；旧网页服务端口迁移必须在配置层完成，
-    不能在调用层偷偷改写用户配置。
-    """
-    cfg = _get_omniparser_config()
-    if not cfg.enabled:
-        return {"error": "OmniParser 未启用。请在插件设置中启用 OmniParser 识屏。"}
-    api_url = cfg.server_url.rstrip("/") + "/process"
-
-    import io
-    screenshot = _mask_own_window(screenshot)
-    buf = io.BytesIO()
-    screenshot.save(buf, format="PNG")
-    png_bytes = buf.getvalue()
-    payload = {
-        "image_b64": base64.b64encode(png_bytes).decode("ascii"),
-        "box_threshold": cfg.box_threshold,
-        "iou_threshold": cfg.iou_threshold,
-        "infer_max_side": cfg.infer_max_side,
-    }
-
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            api_url,
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-        )
-        req.add_header("Content-Type", "application/json")
-        resp = urllib.request.urlopen(req, timeout=120)
-        data = json.loads(resp.read().decode())
-        if data.get("ok"):
-            elements = data.get("elements", [])
-            # 标准化字段名
-            for e in elements:
-                if "x_pct" not in e and "bbox" in e:
-                    bbox = e["bbox"]
-                    e["x_pct"] = round((bbox[0] + bbox[2]) / 2, 5)
-                    e["y_pct"] = round((bbox[1] + bbox[3]) / 2, 5)
-            return {"count": len(elements), "elements": elements[:50]}
-        else:
-            return {"error": data.get("error", "Unknown OmniParser error")}
-    except Exception as e:
-        return {
-            "error": (
-                f"OmniParser 服务不可用 ({api_url})。\n"
-                f"请在插件设置中启用自动启动，或检查插件数据目录下的 logs/omniparser_stderr.log。\n"
-                f"错误: {e}"
-            )
-        }
-
-
-@tool(
-    name="mouse_omniparser_locate",
-    description=(
-        "Use OmniParser (Microsoft UI parsing model) to detect ALL UI elements on screen "
-        "with pixel-precise bounding boxes. "
-        "Returns {type, bbox, text} for every button, icon, text field.\n"
-        "MUCH more accurate than Moondream — OmniParser is trained specifically for UI.\n"
-        "NOTE: requires the embedded OmniParser HTTP server, default http://127.0.0.1:7862."
-    ),
-    group=MOUSE_TOOL_GROUP,
-    risk="low",
-)
 def mouse_omniparser_locate() -> dict[str, Any]:
     _show_busy("鼠标控制: OmniParser 正在解析屏幕…")
     try:
