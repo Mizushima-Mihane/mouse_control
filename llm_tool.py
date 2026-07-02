@@ -2264,7 +2264,7 @@ _CALIB_STEPS: list[dict] = []
 
 @tool(
     name="mouse_calibrate_setup", group=MOUSE_TOOL_GROUP, risk="low",
-    description="Start calibration. Assistant moves to a point, you manually move to the correct position, then call confirm.",
+    description="通用坐标校准。Assistant移动光标到测试点，你手动移到正确位置后调confirm记录偏差。",
 )
 def mouse_calibrate_setup() -> dict[str, Any]:
     global _CALIB_STEPS
@@ -2274,7 +2274,7 @@ def mouse_calibrate_setup() -> dict[str, Any]:
 
 @tool(
     name="mouse_calibrate_point", group=MOUSE_TOOL_GROUP, risk="low",
-    description="Move cursor to corner. REQUIRED args: label='左上', x_pct=0.0, y_pct=0.0. After user corrects position, call mouse_calibrate_confirm(step_id). Do NOT call without args.",
+    description="移动光标到测试点。必需参数: label='左上', x_pct=0.0, y_pct=0.0。用户矫正位置后调mouse_calibrate_confirm。",
 )
 def mouse_calibrate_point(label: str, x_pct: float, y_pct: float) -> dict[str, Any]:
     pg = _get_pg()
@@ -2285,7 +2285,7 @@ def mouse_calibrate_point(label: str, x_pct: float, y_pct: float) -> dict[str, A
 
 @tool(
     name="mouse_calibrate_confirm", group=MOUSE_TOOL_GROUP, risk="low",
-    description="Read current cursor position (after user moved it) and record delta.",
+    description="读取用户矫正后的光标位置，记录偏差值。",
 )
 def mouse_calibrate_confirm(step_id: int) -> dict[str, Any]:
     if step_id < 0 or step_id >= len(_CALIB_STEPS):
@@ -2299,7 +2299,7 @@ def mouse_calibrate_confirm(step_id: int) -> dict[str, Any]:
 
 @tool(
     name="mouse_calibrate_finish", group=MOUSE_TOOL_GROUP, risk="low",
-    description="Save average offset from all calibration steps.",
+    description="保存平均偏差，后续所有点击自动修正。",
 )
 def mouse_calibrate_finish() -> dict[str, Any]:
     global _OFFSET_X, _OFFSET_Y, _CALIB_STEPS, _OFFSET_LOADED
@@ -2321,56 +2321,6 @@ def mouse_calibrate_finish() -> dict[str, Any]:
 
 
 # ── cloud_vision 独立校准 ────────────────────────────────────────
-
-_CALIB_CLOUD: list[dict] = []
-
-@tool(name="mouse_calibrate_cloud_setup", group=MOUSE_TOOL_GROUP, risk="low",
-      description="Start cloud_vision calibration. Same flow as mouse_calibrate_setup but saves to cloud_vision offset.")
-def mouse_calibrate_cloud_setup() -> dict[str, Any]:
-    global _CALIB_CLOUD
-    _CALIB_CLOUD = []
-    _load_calibration()
-    return {"cloud_offset": [_OFFSET_CLOUD_X, _OFFSET_CLOUD_Y]}
-
-@tool(name="mouse_calibrate_cloud_point", group=MOUSE_TOOL_GROUP, risk="low",
-      description="Move cursor for cloud_vision calibration. REQUIRED args: label='左上', x_pct=0.0, y_pct=0.0. Do NOT call without args.")
-def mouse_calibrate_cloud_point(label: str, x_pct: float, y_pct: float) -> dict[str, Any]:
-    pg = _get_pg()
-    tx, ty = _cloud_to_pixels(x_pct, y_pct)
-    pg.moveTo(tx, ty, duration=0.2)
-    _CALIB_CLOUD.append({"label": label, "tx": tx, "ty": ty})
-    return {"step": len(_CALIB_CLOUD)-1, "label": label}
-
-@tool(name="mouse_calibrate_cloud_confirm", group=MOUSE_TOOL_GROUP, risk="low",
-      description="Read user-corrected cursor position for cloud calibration.")
-def mouse_calibrate_cloud_confirm(step_id: int) -> dict[str, Any]:
-    if step_id < 0 or step_id >= len(_CALIB_CLOUD):
-        return {"error": f"Invalid step {step_id}"}
-    s = _CALIB_CLOUD[step_id]
-    pg = _get_pg()
-    ax, ay = pg.position()
-    s["dx"], s["dy"] = ax - s["tx"], ay - s["ty"]
-    return {"step": step_id, "delta": [s["dx"], s["dy"]]}
-
-@tool(name="mouse_calibrate_cloud_finish", group=MOUSE_TOOL_GROUP, risk="low",
-      description="Save cloud_vision calibration offset.")
-def mouse_calibrate_cloud_finish() -> dict[str, Any]:
-    global _OFFSET_CLOUD_X, _OFFSET_CLOUD_Y, _CALIB_CLOUD, _OFFSET_LOADED
-    done = [s for s in _CALIB_CLOUD if "dx" in s]
-    if not done:
-        return {"error": "No confirmed cloud steps"}
-    dx = sum(s["dx"] for s in done) // len(done)
-    dy = sum(s["dy"] for s in done) // len(done)
-    _OFFSET_CLOUD_X, _OFFSET_CLOUD_Y = dx, dy
-    _OFFSET_LOADED = True
-    from pathlib import Path
-    from plugins.mouse_control.config_omniparser import load_config as _lcfg, save_config as _scfg
-    root = Path(__file__).resolve().parent
-    cfg = _lcfg(root)
-    cfg.offset_cloud_x, cfg.offset_cloud_y = dx, dy
-    _scfg(cfg, root)
-    _CALIB_CLOUD = []
-    return {"cloud_offset": [dx, dy], "samples": len(done)}
 
 
 def _enum_taskbar_hwnd() -> list[dict]:
@@ -2448,80 +2398,6 @@ def _window_button_pos(query: str, btn: str) -> dict[str, Any]:
         return {"action": btn, "window": win["title"], "x_pixel": x, "y_pixel": y, "clicked": True}
     except Exception as e:
         return {"error": str(e)}
-
-
-@tool(name="mouse_detect_buttons", group=MOUSE_TOOL_GROUP, risk="low",
-      description="Auto-detect window button positions on current foreground window. Returns actual close/max/min X offsets from right edge. Use once to calibrate.")
-def mouse_detect_buttons() -> dict[str, Any]:
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return {"error": "No foreground window"}
-
-    r = wintypes.RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(r))
-    right = r.right
-
-    # 用 SystemParametersInfo 读标题栏按钮宽度
-    # SPI_GETCAPTIONBUTTONSIZE doesn't exist. Use SM_CXSIZE for caption button width.
-    btn_w = user32.GetSystemMetrics(29)  # SM_CXSIZE = 30, but varies by Windows version
-    btn_h = user32.GetSystemMetrics(30)  # SM_CYSIZE = 31
-    # Actually SM_CXSIZE is caption width, not button width.
-    # Use GetTitleBarInfo if available.
-
-    class TITLEBARINFO(ctypes.Structure):
-        _fields_ = [
-            ('cbSize', wintypes.DWORD),
-            ('rcTitleBar', wintypes.RECT),
-            ('rgstate', wintypes.DWORD * 6),
-            ('rgrect', wintypes.RECT * 6),
-        ]
-    tbi = TITLEBARINFO()
-    tbi.cbSize = ctypes.sizeof(TITLEBARINFO)
-    
-    if user32.GetTitleBarInfo(hwnd, ctypes.byref(tbi)):
-        # rgrect indices: 2=close, 3=min, 5=help (varies)
-        buttons = {}
-        for i in range(6):
-            gr = tbi.rgrect[i]
-            if gr.right > gr.left and gr.bottom > gr.top:
-                offset = right - (gr.left + gr.right) // 2
-                label = {2: "close", 3: "minimize", 4: "maximize", 5: "help"}.get(i, f"btn{i}")
-                buttons[label] = {
-                    "x_offset_from_right": offset,
-                    "x_pixel": (gr.left + gr.right) // 2,
-                    "width": gr.right - gr.left,
-                }
-        if buttons:
-            close = buttons.get("close", {})
-            maximize = buttons.get("maximize", {})
-            minimize = buttons.get("minimize", {})
-            return {
-                "method": "GetTitleBarInfo",
-                "close": close.get("x_offset_from_right", 12),
-                "maximize": maximize.get("x_offset_from_right", 34),
-                "minimize": minimize.get("x_offset_from_right", 56),
-                "raw": {k: {"offset": v["x_offset_from_right"], "w": v["width"]} for k, v in buttons.items()},
-            }
-
-    # Fallback: estimate from system metrics
-    caption_h = user32.GetSystemMetrics(4)   # SM_CYCAPTION
-    frame_w = user32.GetSystemMetrics(32)     # SM_CXSIZEFRAME  
-    btn_est_w = caption_h - 6  # button is roughly caption height minus padding
-    gap = max(2, frame_w // 2)
-    return {
-        "method": "SystemMetrics_estimate",
-        "caption_height": caption_h,
-        "estimated_button_width": btn_est_w,
-        "close": btn_est_w // 2 + 2,
-        "maximize": btn_est_w + gap + btn_est_w // 2 + 2,
-        "minimize": 2 * (btn_est_w + gap) + btn_est_w // 2 + 2,
-        "note": "Estimated from system metrics. For precise values, try with a standard Win32 window as foreground.",
-    }
-
 
 
 @tool(name="mouse_reset_interrupt", group=MOUSE_TOOL_GROUP, risk="low",
